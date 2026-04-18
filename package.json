@@ -1,0 +1,11 @@
+{
+  "name": "chess-coach",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @chess-coach/web dev",
+    "dev:api": "bash scripts/run-api.sh",
+    "build:web": "pnpm --filter @chess-coach/web build"
+  },
+  "packageManager": "pnpm@9.1.0"
+}

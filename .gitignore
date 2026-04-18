@@ -1,0 +1,27 @@
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.local
+*.egg-info/
+
+.DS_Store
+.idea/
+.vscode/
+
+# Local-only data
+tools/games/
+*.pgn
+*.sqlite
+*.db
+
+# Ralph loop run logs
+.ralph/
