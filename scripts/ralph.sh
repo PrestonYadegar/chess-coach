@@ -21,6 +21,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# On macOS, prevent system sleep while ralph runs — long pnpm installs or
+# build steps can otherwise outlive the display-sleep timer, kill the
+# streaming connection, and waste an iteration. Re-exec under caffeinate
+# unless explicitly disabled (NO_CAFFEINATE=1) or already wrapped.
+if [[ "${RALPH_CAFFEINATED:-0}" != "1" && "${NO_CAFFEINATE:-0}" != "1" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v caffeinate >/dev/null 2>&1; then
+    echo "[ralph] re-executing under caffeinate to prevent sleep"
+    export RALPH_CAFFEINATED=1
+    exec caffeinate -i -s -- "$0" "$@"
+  fi
+fi
+
 MAX_ITERS="${MAX_ITERS:-20}"
 PER_ITER_TIMEOUT="${PER_ITER_TIMEOUT:-1800}"
 DRY_RUN="${DRY_RUN:-0}"
