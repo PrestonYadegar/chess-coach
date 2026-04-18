@@ -25,4 +25,14 @@ CONSTRAINTS:
 - Stockfish must be invoked via python-chess `chess.engine.SimpleEngine`. If `stockfish` is not on PATH, fail loudly with instructions ("brew install stockfish").
 - Never delete games/, the existing tools/games/ archive, or rewrite git history.
 
+EFFICIENCY RULES — these cost real money/time, follow them:
+- **Always use absolute paths.** Your cwd is not stable across Bash calls; `cd apps/api && ...` has bitten us. Use `/Users/prestonyadegar/CodingProjects/personal_repos/chess_coach/...` or `$ROOT/...` where you set ROOT once.
+- **To start the API, run `scripts/run-api.sh` in the background.** Do not hand-roll `uvicorn` invocations from arbitrary cwds. Wait for `/health` to return 200 by polling with curl (cap at ~15s), then proceed.
+- **To stop the API after smoke testing, `pkill -f "uvicorn app.main:app"`.** Always clean up so the next iteration starts fresh.
+- **Do not re-create the venv if `apps/api/.venv` exists.** `run-api.sh` handles that.
+- **Skip the smoke step entirely when there is nothing runnable to test** (e.g. doc-only or PRD-only edits).
+- **One implementation pass, one verification pass.** If the first verification reveals a bug, fix and re-verify once. If it still fails, mark as `> blocker:` and exit — do not enter a multi-round fix-test-fix-test spiral.
+- **Keep tool output small.** Every byte of a Bash/Read result lands in your context and costs tokens. Use targeted commands: `find <dir> -maxdepth 2 -name '<pat>'` not bare `find .`; `ls <specific-dir>` not recursive listings; `head`/`tail` when you only need a slice. If a Bash result is truncated as "Output too large", that's a signal you asked the wrong question — rerun with narrower scope rather than reading the persisted file.
+- **Never mutate the SQLite DB while uvicorn is holding it.** SQLite uses file locks; concurrent writers get "database is locked" errors. Order: stop API (`pkill -f "uvicorn app.main:app"`) → mutate DB → restart API. If you only need read-only inspection, that's fine alongside a running API.
+
 If you cannot complete the task (missing tool, unclear spec, real blocker), do NOT half-implement. Instead: leave the checkbox unchecked, add a `> blocker:` note immediately under the checkbox describing the problem, commit only that note with message `ralph: blocker on <task>`, and exit.

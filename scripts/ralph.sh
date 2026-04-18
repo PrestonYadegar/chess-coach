@@ -24,7 +24,12 @@ cd "$ROOT"
 MAX_ITERS="${MAX_ITERS:-20}"
 PER_ITER_TIMEOUT="${PER_ITER_TIMEOUT:-1800}"
 DRY_RUN="${DRY_RUN:-0}"
-MODEL="${MODEL:-claude-opus-4-7}"
+# Default to Sonnet — the per-iteration tasks are small, spec-guided edits,
+# so Opus's extra capability rarely pays for itself here.
+#   MODEL=claude-opus-4-7    most capable, ~5x cost
+#   MODEL=claude-sonnet-4-6  default — strong + cheap
+#   MODEL=claude-haiku-4-5-20251001  cheapest, fine for trivial tasks
+MODEL="${MODEL:-claude-sonnet-4-6}"
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-15}"
 LOG_DIR="${LOG_DIR:-.ralph}"
 
@@ -85,6 +90,7 @@ while (( iter < MAX_ITERS )); do
   iter_start=$(date +%s)
 
   # Heartbeat: print elapsed time every $HEARTBEAT_SECS while claude runs.
+  # `disown` so its SIGTERM doesn't print a "Terminated:" line on exit.
   (
     while :; do
       sleep "$HEARTBEAT_SECS"
@@ -93,6 +99,7 @@ while (( iter < MAX_ITERS )); do
     done
   ) &
   HEARTBEAT_PID=$!
+  disown $HEARTBEAT_PID 2>/dev/null || true
   trap 'kill $HEARTBEAT_PID 2>/dev/null || true' EXIT INT TERM
 
   # Stream Claude's JSON events through a small Python pretty-printer so
