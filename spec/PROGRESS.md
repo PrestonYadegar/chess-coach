@@ -16,9 +16,9 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 - [x] Web: render eval bar + per-move classification badges on game detail page.
 
 ## Phase 3 — Mistake patterns
-- [ ] API: motif tagger heuristics for the 9 tags listed in PRD.
-- [ ] API: `GET /players/{username}/patterns`.
-- [ ] Web: `/players/[username]/patterns` page.
+- [x] API: motif tagger heuristics for the 9 tags listed in PRD.
+- [x] API: `GET /players/{username}/patterns`.
+- [x] Web: `/players/[username]/patterns` page.
 
 ## Phase 4 — Puzzles
 - [ ] Importer for Lichess open puzzle DB.
@@ -44,3 +44,6 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 2026-06-13 10:00  POST /games/{id}/analyze — Stockfish per-ply analysis, classification, idempotent persist  21d19f731272110cbed8943f03b770808ebc0b68
 2026-06-13 10:15  GET /games/{id}/analysis — return per-ply analysis rows  ef6a2bd312a7366d3ab73d7c73fa3c303b649744
 2026-06-13 10:30  Web: eval bar + per-move classification badges on game detail page  4777b401bb60bbf3388af5f7c7729b76a1feb2b8
+2026-06-13 11:00  API: motif tagger heuristics (9 tags) integrated into analyze pipeline  8ed817ecabe58d139d1f07b4e179443cd2898643
+2026-06-13 11:15  API: GET /players/{username}/patterns — motif aggregation endpoint  2933c6af9b20c538d2e71f308caa0f306cfec52d
+2026-06-13 11:30  Web: /players/[username]/patterns — motif cards page with frequency bar and drill CTA  ebfeddbabbce19050e121b6fd4120e9b8a3001ec

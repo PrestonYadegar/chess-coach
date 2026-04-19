@@ -1,3 +1,5 @@
+import json
+from collections import defaultdict
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -76,6 +78,60 @@ def get_game(game_id: int) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="game not found")
     return dict(row)
+
+
+@app.get("/players/{username}/patterns")
+def get_player_patterns(username: str) -> dict:
+    username = username.strip().lower()
+    with conn_ctx() as conn:
+        row = conn.execute(
+            "SELECT username FROM players WHERE username = ?", (username,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="player not found")
+
+        rows = conn.execute(
+            "SELECT a.game_id, a.fen, a.motif_tags"
+            " FROM analyses a"
+            " JOIN games g ON g.id = a.game_id"
+            " WHERE g.player_username = ?"
+            "   AND a.motif_tags IS NOT NULL"
+            "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
+            " ORDER BY a.game_id DESC",
+            (username,),
+        ).fetchall()
+
+    # Aggregate per motif
+    counts: dict[str, int] = defaultdict(int)
+    last_game: dict[str, int] = {}
+    examples: dict[str, list] = defaultdict(list)
+
+    for r in rows:
+        game_id = r["game_id"]
+        fen = r["fen"]
+        try:
+            tags = json.loads(r["motif_tags"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        for tag in tags:
+            counts[tag] += 1
+            if tag not in last_game:
+                last_game[tag] = game_id
+            if len(examples[tag]) < 3:
+                examples[tag].append(fen)
+
+    patterns = [
+        {
+            "motif": motif,
+            "count": counts[motif],
+            "last_seen_game_id": last_game.get(motif),
+            "example_fens": examples[motif],
+        }
+        for motif in sorted(counts, key=lambda m: counts[m], reverse=True)
+    ]
+
+    return {"username": username, "patterns": patterns}
 
 
 @app.get("/players/{username}/games")

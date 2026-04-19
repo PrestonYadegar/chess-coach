@@ -8,6 +8,8 @@ import chess
 import chess.engine
 import chess.pgn
 
+from .motif import encode_tags, tag_motifs
+
 
 STOCKFISH_PATH = shutil.which("stockfish")
 DEFAULT_DEPTH = 18
@@ -110,7 +112,12 @@ def analyze_game(game_id: int, conn: sqlite3.Connection, depth: int = DEFAULT_DE
             else:
                 classification = _classify(before_player, after_player)
 
-            # eval_cp stored as white-relative centipawns after the move
+            # Motif tagging (heuristic, only for mistakes/blunders/inaccuracies)
+            best_move_obj = chess.Move.from_uci(best_move_uci) if best_move_uci else None
+            board_for_tags = chess.Board(fen_before)
+            motif_list = tag_motifs(board_for_tags, move, best_move_obj, classification)
+            motif_tags_json = encode_tags(motif_list)
+
             rows_to_insert.append((
                 game_id,
                 ply_index,
@@ -119,7 +126,7 @@ def analyze_game(game_id: int, conn: sqlite3.Connection, depth: int = DEFAULT_DE
                 played_move_uci,
                 eval_after_cp,
                 classification,
-                None,  # motif_tags filled in Phase 3
+                motif_tags_json,
             ))
 
             score_before = info_after["score"].white()
