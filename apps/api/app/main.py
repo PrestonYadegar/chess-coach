@@ -3,6 +3,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 import httpx
 
+from .analyze import analyze_game
 from .chesscom import sync_player_games
 from .db import conn_ctx, init_db
 
@@ -34,6 +35,34 @@ def sync_player(username: str) -> dict:
         )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"chess.com fetch failed: {e}")
+
+
+@app.post("/games/{game_id}/analyze")
+def analyze(game_id: int, depth: int = Query(default=18, ge=1, le=30)) -> dict:
+    try:
+        with conn_ctx() as conn:
+            return analyze_game(game_id, conn, depth=depth)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/games/{game_id}/analysis")
+def get_game_analysis(game_id: int) -> dict:
+    with conn_ctx() as conn:
+        game_row = conn.execute("SELECT id FROM games WHERE id = ?", (game_id,)).fetchone()
+        if not game_row:
+            raise HTTPException(status_code=404, detail="game not found")
+        rows = conn.execute(
+            "SELECT ply, fen, best_move, played_move, eval_cp, classification, motif_tags"
+            " FROM analyses WHERE game_id = ? ORDER BY ply",
+            (game_id,),
+        ).fetchall()
+    return {
+        "game_id": game_id,
+        "plies": [dict(r) for r in rows],
+    }
 
 
 @app.get("/games/{game_id}")

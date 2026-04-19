@@ -16,6 +16,16 @@ interface Game {
   pgn: string;
 }
 
+export interface PlyAnalysis {
+  ply: number;
+  fen: string;
+  best_move: string | null;
+  played_move: string | null;
+  eval_cp: number | null;
+  classification: string | null;
+  motif_tags: string | null;
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString("en-US", {
@@ -55,6 +65,7 @@ export default async function GameDetailPage({
 
   let game: Game | null = null;
   let fetchError: string | null = null;
+  let analysis: PlyAnalysis[] = [];
 
   try {
     const res = await fetch(`${API_URL}/games/${gameId}`, { cache: "no-store" });
@@ -67,6 +78,18 @@ export default async function GameDetailPage({
     }
   } catch {
     fetchError = "Could not reach the chess-coach API. Is it running?";
+  }
+
+  if (game) {
+    try {
+      const res = await fetch(`${API_URL}/games/${gameId}/analysis`, { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        analysis = data.plies ?? [];
+      }
+    } catch {
+      // analysis is optional — silently skip
+    }
   }
 
   const label = game ? resultLabel(game.result, username, game.white) : "";
@@ -108,7 +131,7 @@ export default async function GameDetailPage({
       )}
 
       {game && (
-        <GameViewer pgn={game.pgn} white={game.white} black={game.black} />
+        <GameViewer pgn={game.pgn} white={game.white} black={game.black} analysis={analysis} />
       )}
     </main>
   );

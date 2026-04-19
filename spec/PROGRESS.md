@@ -11,9 +11,9 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 - [x] Web: `/players/[username]/games/[id]` — game detail (board + moves, no analysis yet).
 
 ## Phase 2 — Engine analysis
-- [ ] API: `POST /games/{id}/analyze` — Stockfish per-ply, classify, persist. Idempotent.
-- [ ] API: `GET /games/{id}/analysis`.
-- [ ] Web: render eval bar + per-move classification badges on game detail page.
+- [x] API: `POST /games/{id}/analyze` — Stockfish per-ply, classify, persist. Idempotent.
+- [x] API: `GET /games/{id}/analysis`.
+- [x] Web: render eval bar + per-move classification badges on game detail page.
 
 ## Phase 3 — Mistake patterns
 - [ ] API: motif tagger heuristics for the 9 tags listed in PRD.
@@ -41,3 +41,6 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 2026-06-13 07:35  Web: / homepage with username input, sync trigger, redirect to /players/[username]  54ee32e354d6072f09642de8e87ec556bd19afae
 2026-06-13 08:15  Web: /players/[username] game list table with pagination and result display  f67e8acd92b01b2de8b4d2828231b8e2fba1096b
 2026-06-13 09:05  Web: /players/[username]/games/[id] game detail page with board and move list  f868314a3bcfdf6e574264174879194bc4922d4d
+2026-06-13 10:00  POST /games/{id}/analyze — Stockfish per-ply analysis, classification, idempotent persist  21d19f731272110cbed8943f03b770808ebc0b68
+2026-06-13 10:15  GET /games/{id}/analysis — return per-ply analysis rows  ef6a2bd312a7366d3ab73d7c73fa3c303b649744
+2026-06-13 10:30  Web: eval bar + per-move classification badges on game detail page  4777b401bb60bbf3388af5f7c7729b76a1feb2b8

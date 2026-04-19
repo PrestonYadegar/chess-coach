@@ -48,5 +48,18 @@ def init_db() -> None:
                 FOREIGN KEY(player_username) REFERENCES players(username)
             );
             CREATE INDEX IF NOT EXISTS idx_games_player ON games(player_username, played_at);
+            CREATE TABLE IF NOT EXISTS analyses (
+                game_id INTEGER NOT NULL,
+                ply INTEGER NOT NULL,
+                fen TEXT NOT NULL,
+                best_move TEXT,
+                played_move TEXT,
+                eval_cp INTEGER,
+                classification TEXT,
+                motif_tags TEXT,
+                PRIMARY KEY (game_id, ply),
+                FOREIGN KEY(game_id) REFERENCES games(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_analyses_game ON analyses(game_id);
             """
         )
