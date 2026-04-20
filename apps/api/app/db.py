@@ -27,6 +27,16 @@ def conn_ctx():
 
 def init_db() -> None:
     with conn_ctx() as conn:
+        # One-shot migration: the analyses schema gained a `phase` column.
+        # Drop the old table on first boot under the new code; results will be
+        # rebuilt as games are re-analyzed.
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='analyses'"
+        ).fetchone()
+        if existing:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()}
+            if "phase" not in cols:
+                conn.execute("DROP TABLE analyses")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS players (
@@ -57,10 +67,12 @@ def init_db() -> None:
                 eval_cp INTEGER,
                 classification TEXT,
                 motif_tags TEXT,
+                phase TEXT,
                 PRIMARY KEY (game_id, ply),
                 FOREIGN KEY(game_id) REFERENCES games(id)
             );
             CREATE INDEX IF NOT EXISTS idx_analyses_game ON analyses(game_id);
+            CREATE INDEX IF NOT EXISTS idx_analyses_phase ON analyses(phase);
             CREATE TABLE IF NOT EXISTS puzzles (
                 id TEXT PRIMARY KEY,
                 source TEXT NOT NULL DEFAULT 'lichess',

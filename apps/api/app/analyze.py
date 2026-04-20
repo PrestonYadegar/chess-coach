@@ -1,28 +1,49 @@
 """Stockfish per-ply analysis for a single game."""
+import concurrent.futures as cf
 import io
+import os
 import shutil
 import sqlite3
-from typing import Optional
+from multiprocessing import get_context
+from typing import Iterable, Optional
 
 import chess
 import chess.engine
 import chess.pgn
 
-from .motif import encode_tags, tag_motifs
+from .motif import compute_phase, encode_tags, tag_motifs
 
 
 STOCKFISH_PATH = shutil.which("stockfish")
 DEFAULT_DEPTH = 18
 
+# Time-class buckets, ordered longest → shortest. Used for prioritizing which
+# games to analyze first when a player has thousands of games.
+TIME_CLASSES = ("classical", "rapid", "blitz", "bullet", "daily", "unknown")
+_CLASS_PRIORITY = {tc: i for i, tc in enumerate(TIME_CLASSES)}
+
+
+def _time_class(tc: Optional[str]) -> str:
+    """Map a chess.com `time_control` string ("60", "180+1", "1/259200") to a class."""
+    if not tc:
+        return "unknown"
+    if "/" in tc:
+        return "daily"
+    base_str = tc.split("+", 1)[0]
+    try:
+        base = int(base_str)
+    except ValueError:
+        return "unknown"
+    if base < 180:
+        return "bullet"
+    if base < 600:
+        return "blitz"
+    if base < 1800:
+        return "rapid"
+    return "classical"
+
 
 def _classify(eval_before_cp: Optional[int], eval_after_cp: Optional[int]) -> str:
-    """Classify a move based on centipawn swing from the player's perspective.
-
-    Both values are from the perspective of the side to move at that ply
-    (before the move was played).  eval_before is the engine score before the
-    move; eval_after is the score from the opponent's perspective negated so
-    it's back in the player's frame.
-    """
     if eval_before_cp is None or eval_after_cp is None:
         return "good"
     swing = eval_before_cp - eval_after_cp
@@ -35,107 +56,349 @@ def _classify(eval_before_cp: Optional[int], eval_after_cp: Optional[int]) -> st
     return "good"
 
 
-def analyze_game(game_id: int, conn: sqlite3.Connection, depth: int = DEFAULT_DEPTH) -> dict:
+def _make_engine() -> chess.engine.SimpleEngine:
     if STOCKFISH_PATH is None:
         raise RuntimeError(
             "stockfish not found on PATH. Install it: brew install stockfish"
         )
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+    try:
+        engine.configure({"Threads": 1, "Hash": 128})
+    except chess.engine.EngineError:
+        pass
+    return engine
 
-    row = conn.execute("SELECT pgn FROM games WHERE id = ?", (game_id,)).fetchone()
-    if not row:
-        raise ValueError(f"game {game_id} not found")
 
-    pgn_text = row["pgn"]
+def _analyze_pgn_rows(
+    game_id: int,
+    pgn_text: str,
+    engine: chess.engine.SimpleEngine,
+    depth: int,
+) -> list[tuple]:
+    """Pure analysis: PGN → list of analysis row tuples. No DB I/O."""
     game = chess.pgn.read_game(io.StringIO(pgn_text))
     if game is None:
         raise ValueError(f"could not parse PGN for game {game_id}")
 
-    # Delete existing analysis rows for idempotency
+    board = game.board()
+    moves = list(game.mainline_moves())
+
+    limit = chess.engine.Limit(depth=depth)
+    # multipv=2 gives us the second-best line, needed for the "only-move missed"
+    # detector. Adds ~1.5–2× engine cost per ply but enables sharper tagging.
+    infos_before = engine.analyse(board, limit, multipv=2)
+
+    rows: list[tuple] = []
+
+    for ply_index, move in enumerate(moves):
+        fen_before = board.fen()
+        played_move_uci = move.uci()
+        mover = board.turn
+
+        best_info = infos_before[0]
+        score_before_white = best_info["score"].white()
+        score_before_mover = best_info["score"].pov(mover)
+        second_info = infos_before[1] if len(infos_before) > 1 else None
+        second_score_mover = (
+            second_info["score"].pov(mover) if second_info is not None else None
+        )
+
+        if score_before_white.is_mate():
+            eval_before_cp = None
+            is_mate_before = True
+        else:
+            eval_before_cp = score_before_white.score()
+            is_mate_before = False
+
+        pv = best_info.get("pv")
+        best_move_uci = pv[0].uci() if pv else played_move_uci
+
+        phase = compute_phase(board)
+        board.push(move)
+
+        infos_after = engine.analyse(board, limit, multipv=2)
+        best_after = infos_after[0]
+        score_after_white = best_after["score"].white()
+        # Mover's POV after the move: opponent is to move, so flip back.
+        score_after_mover = best_after["score"].pov(mover)
+
+        if score_after_white.is_mate():
+            eval_after_cp = None
+            is_mate_after = True
+        else:
+            eval_after_cp = score_after_white.score()
+            is_mate_after = False
+
+        is_white_move = (mover == chess.WHITE)
+        if is_white_move:
+            before_player = eval_before_cp
+            after_player = eval_after_cp
+        else:
+            before_player = (-eval_before_cp) if eval_before_cp is not None else None
+            after_player = (-eval_after_cp) if eval_after_cp is not None else None
+
+        if is_mate_before != is_mate_after or (
+            is_mate_before and is_mate_after and before_player != after_player
+        ):
+            classification = "blunder"
+        else:
+            classification = _classify(before_player, after_player)
+
+        best_move_obj = chess.Move.from_uci(best_move_uci) if best_move_uci else None
+        board_for_tags = chess.Board(fen_before)
+        motif_list = tag_motifs(
+            board_for_tags,
+            move,
+            best_move_obj,
+            classification,
+            score_before=score_before_mover,
+            score_after=score_after_mover,
+            second_pv_score=second_score_mover,
+            phase=phase,
+        )
+        motif_tags_json = encode_tags(motif_list)
+
+        rows.append((
+            game_id,
+            ply_index,
+            fen_before,
+            best_move_uci,
+            played_move_uci,
+            eval_after_cp,
+            classification,
+            motif_tags_json,
+            phase,
+        ))
+
+        # Carry forward: the eval/pv we just computed for the resulting position
+        # IS the "before" state for the next ply.
+        infos_before = infos_after
+
+    return rows
+
+
+def _write_rows(conn: sqlite3.Connection, game_id: int, rows: list[tuple]) -> int:
     conn.execute("DELETE FROM analyses WHERE game_id = ?", (game_id,))
-
-    rows_to_insert = []
-
-    with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
-        board = game.board()
-        moves = list(game.mainline_moves())
-
-        # Get eval before first move
-        info_before = engine.analyse(board, chess.engine.Limit(depth=depth))
-        score_before = info_before["score"].white()
-
-        for ply_index, move in enumerate(moves):
-            fen_before = board.fen()
-            played_move_uci = move.uci()
-
-            # eval before (from white's perspective)
-            if score_before.is_mate():
-                eval_before_cp = None
-                is_mate_before = True
-            else:
-                eval_before_cp = score_before.score()
-                is_mate_before = False
-
-            # Get best move and its eval
-            best_move_uci = info_before.get("pv", [move])[0].uci() if info_before.get("pv") else played_move_uci
-
-            # Make the actual move
-            board.push(move)
-
-            # Evaluate after the move (opponent's turn, so negate for player's frame)
-            info_after = engine.analyse(board, chess.engine.Limit(depth=depth))
-            score_after = info_after["score"].white()
-
-            if score_after.is_mate():
-                eval_after_cp = None
-                is_mate_after = True
-            else:
-                eval_after_cp = score_after.score()
-                is_mate_after = False
-
-            # Compute classification in the moving side's frame
-            # ply_index 0,2,4,... = white moves; 1,3,5,... = black moves
-            is_white_move = (ply_index % 2 == 0)
-            if is_white_move:
-                before_player = eval_before_cp
-                # after: board is now black to move; white perspective after move
-                after_player = eval_after_cp
-            else:
-                # negate for black's frame
-                before_player = (-eval_before_cp) if eval_before_cp is not None else None
-                after_player = (-eval_after_cp) if eval_after_cp is not None else None
-
-            # Mate swings always blunder
-            if is_mate_before != is_mate_after or (
-                is_mate_before and is_mate_after and before_player != after_player
-            ):
-                classification = "blunder"
-            else:
-                classification = _classify(before_player, after_player)
-
-            # Motif tagging (heuristic, only for mistakes/blunders/inaccuracies)
-            best_move_obj = chess.Move.from_uci(best_move_uci) if best_move_uci else None
-            board_for_tags = chess.Board(fen_before)
-            motif_list = tag_motifs(board_for_tags, move, best_move_obj, classification)
-            motif_tags_json = encode_tags(motif_list)
-
-            rows_to_insert.append((
-                game_id,
-                ply_index,
-                fen_before,
-                best_move_uci,
-                played_move_uci,
-                eval_after_cp,
-                classification,
-                motif_tags_json,
-            ))
-
-            score_before = info_after["score"].white()
-
     conn.executemany(
         "INSERT OR REPLACE INTO analyses"
-        " (game_id, ply, fen, best_move, played_move, eval_cp, classification, motif_tags)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        rows_to_insert,
+        " (game_id, ply, fen, best_move, played_move, eval_cp, classification,"
+        "  motif_tags, phase)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
     )
+    return len(rows)
 
-    return {"game_id": game_id, "plies_analyzed": len(rows_to_insert)}
+
+def analyze_game(game_id: int, conn: sqlite3.Connection, depth: int = DEFAULT_DEPTH) -> dict:
+    row = conn.execute("SELECT pgn FROM games WHERE id = ?", (game_id,)).fetchone()
+    if not row:
+        raise ValueError(f"game {game_id} not found")
+
+    with _make_engine() as engine:
+        rows = _analyze_pgn_rows(game_id, row["pgn"], engine, depth)
+
+    plies = _write_rows(conn, game_id, rows)
+    return {"game_id": game_id, "plies_analyzed": plies}
+
+
+# ── Parallel worker plumbing ─────────────────────────────────────────────────
+# Each worker process holds its own long-lived Stockfish engine in a module
+# global, initialized once on pool startup. Spawn start method is used so the
+# initializer runs in a clean interpreter (asyncio + fork is fragile on macOS).
+
+_WORKER_ENGINE: Optional[chess.engine.SimpleEngine] = None
+
+
+def _worker_init(stockfish_path: str) -> None:
+    global _WORKER_ENGINE
+    _WORKER_ENGINE = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+    try:
+        _WORKER_ENGINE.configure({"Threads": 1, "Hash": 128})
+    except chess.engine.EngineError:
+        pass
+
+
+def _worker_analyze(game_id: int, pgn_text: str, depth: int):
+    try:
+        rows = _analyze_pgn_rows(game_id, pgn_text, _WORKER_ENGINE, depth)
+        return ("ok", game_id, rows)
+    except Exception as e:
+        return ("err", game_id, str(e))
+
+
+def _select_games(
+    conn: sqlite3.Connection,
+    username: str,
+    only_unanalyzed: bool,
+    time_classes: Optional[Iterable[str]],
+    limit: int,
+) -> list[sqlite3.Row]:
+    """Return games to analyze, ordered longest-time-control first then most-recent."""
+    if only_unanalyzed:
+        sql = (
+            "SELECT g.id, g.white, g.black, g.time_control, g.pgn, g.played_at"
+            " FROM games g"
+            " LEFT JOIN (SELECT DISTINCT game_id FROM analyses) a ON a.game_id = g.id"
+            " WHERE g.player_username = ? AND a.game_id IS NULL"
+        )
+    else:
+        sql = (
+            "SELECT id, white, black, time_control, pgn, played_at"
+            " FROM games g WHERE player_username = ?"
+        )
+    rows = conn.execute(sql, (username,)).fetchall()
+
+    allowed = set(time_classes) if time_classes else None
+    decorated = []
+    for r in rows:
+        cls = _time_class(r["time_control"])
+        if allowed and cls not in allowed:
+            continue
+        decorated.append((_CLASS_PRIORITY.get(cls, 99), r["played_at"] or "", r, cls))
+
+    # Stable two-pass: within each class, most recent first; then class priority.
+    decorated.sort(key=lambda t: t[1], reverse=True)
+    decorated.sort(key=lambda t: t[0])
+
+    return [d[2] for d in decorated[:limit]]
+
+
+def analyze_player_games_events(
+    username: str,
+    conn: sqlite3.Connection,
+    depth: int = 14,
+    limit: int = 50,
+    only_unanalyzed: bool = True,
+    workers: int = 1,
+    time_classes: Optional[Iterable[str]] = None,
+):
+    """Generator yielding SSE-shaped progress events while analyzing a batch.
+
+    workers > 1 fans out across processes, each with its own Stockfish instance.
+    Games are ordered by time-class priority (classical → rapid → blitz → bullet
+    → daily) and then by most recent first.
+    """
+    if STOCKFISH_PATH is None:
+        yield {
+            "type": "error",
+            "message": "stockfish not found on PATH. Install it: brew install stockfish",
+        }
+        return
+
+    player_row = conn.execute(
+        "SELECT username FROM players WHERE username = ?", (username,)
+    ).fetchone()
+    if not player_row:
+        yield {"type": "error", "message": f"player not found: {username}"}
+        return
+
+    rows = _select_games(conn, username, only_unanalyzed, time_classes, limit)
+    total = len(rows)
+    yield {
+        "type": "start",
+        "username": username,
+        "games": total,
+        "depth": depth,
+        "workers": workers,
+    }
+
+    if total == 0:
+        yield {"type": "done", "analyzed": 0, "total": 0}
+        return
+
+    labels = {r["id"]: f"{r['white']} vs {r['black']}" for r in rows}
+    analyzed = 0
+    plies_total = 0
+
+    def _emit_done(game_id: int, plies: int, i: int):
+        nonlocal analyzed, plies_total
+        analyzed += 1
+        plies_total += plies
+        return {
+            "type": "game_done",
+            "index": i,
+            "games_total": total,
+            "game_id": game_id,
+            "label": labels.get(game_id, ""),
+            "plies": plies,
+            "analyzed": analyzed,
+            "plies_total": plies_total,
+        }
+
+    if workers <= 1:
+        with _make_engine() as engine:
+            for i, r in enumerate(rows):
+                gid = r["id"]
+                try:
+                    analysis_rows = _analyze_pgn_rows(gid, r["pgn"], engine, depth)
+                    plies = _write_rows(conn, gid, analysis_rows)
+                    conn.commit()
+                    yield _emit_done(gid, plies, i)
+                except Exception as e:
+                    yield {
+                        "type": "game_error",
+                        "index": i,
+                        "games_total": total,
+                        "game_id": gid,
+                        "message": str(e),
+                    }
+    else:
+        ctx = get_context("spawn")
+        # Cap workers at min(requested, cores, games).
+        max_w = max(1, min(workers, (os.cpu_count() or 2), total))
+        pool = cf.ProcessPoolExecutor(
+            max_workers=max_w,
+            mp_context=ctx,
+            initializer=_worker_init,
+            initargs=(STOCKFISH_PATH,),
+        )
+        futures = {
+            pool.submit(_worker_analyze, r["id"], r["pgn"], depth): (i, r["id"])
+            for i, r in enumerate(rows)
+        }
+        try:
+            for fut in cf.as_completed(futures):
+                i, gid = futures[fut]
+                try:
+                    status, ret_gid, payload = fut.result()
+                except Exception as e:
+                    yield {
+                        "type": "game_error",
+                        "index": i,
+                        "games_total": total,
+                        "game_id": gid,
+                        "message": str(e),
+                    }
+                    continue
+                if status == "ok":
+                    plies = _write_rows(conn, ret_gid, payload)
+                    conn.commit()
+                    yield _emit_done(ret_gid, plies, i)
+                else:
+                    yield {
+                        "type": "game_error",
+                        "index": i,
+                        "games_total": total,
+                        "game_id": ret_gid,
+                        "message": str(payload),
+                    }
+        finally:
+            # On client disconnect (GeneratorExit) or normal completion, drop any
+            # queued work AND terminate the worker processes so Stockfish doesn't
+            # keep burning CPU. Default shutdown(wait=True) would block for every
+            # running future to finish — useless if the user clicked Stop.
+            for f in futures:
+                f.cancel()
+            for p in list(pool._processes.values()):
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    yield {
+        "type": "done",
+        "analyzed": analyzed,
+        "total": total,
+        "plies_total": plies_total,
+    }

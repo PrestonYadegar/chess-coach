@@ -5,27 +5,44 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
 from .analyze import analyze_game
-from .chesscom import sync_player_games
+from .chesscom import sync_player_games, sync_player_games_events
 from .db import conn_ctx, init_db
+from .jobs import active_job_for, get_job, start_job, stream as stream_job
 
 # Map our 9 internal motif tags → Lichess theme keywords (used for LIKE search)
 _MOTIF_TO_LICHESS: dict[str, list[str]] = {
     "hanging_piece": ["hangingPiece"],
     "fork_missed": ["fork"],
+    "skewer_missed": ["skewer"],
     "back_rank": ["backRankMate"],
     "pin_missed": ["pin"],
     "discovered_attack": ["discoveredAttack"],
     "overloaded_piece": ["overloadedPiece"],
+    "intermezzo_missed": ["intermezzo", "zugzwang"],
+    "only_move_missed": ["defensiveMove", "quietMove"],
+    "mating_net_missed": ["mateIn1", "mateIn2", "mateIn3", "mateIn4", "mateIn5"],
+    "mating_net_allowed": ["mateIn1", "mateIn2", "mateIn3"],
     "king_safety": ["kingsideAttack", "queensideAttack", "attackingF2F7"],
+    "pawn_structure": ["pawnEndgame", "advancedPawn"],
     "endgame_technique": ["endgame"],
     "opening_principle": ["opening"],
 }
 
 app = FastAPI(title="chess-coach api", version="0.0.0")
+
+# Local-first app: web at :3000 talks to api at :8000 cross-origin.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -53,6 +70,143 @@ def sync_player(username: str) -> dict:
         )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"chess.com fetch failed: {e}")
+
+
+@app.get("/players/{username}/sync/stream")
+def sync_player_stream(username: str) -> StreamingResponse:
+    """Server-Sent Events: one event per archive ingested."""
+    username = username.strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="username required")
+
+    def event_source():
+        try:
+            with conn_ctx() as conn:
+                for event in sync_player_games_events(username, conn):
+                    yield f"data: {json.dumps(event)}\n\n"
+        except httpx.HTTPStatusError as e:
+            payload = {
+                "type": "error",
+                "status": e.response.status_code,
+                "message": f"chess.com error: {e.response.text[:200]}",
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+        except httpx.HTTPError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'chess.com fetch failed: {e}'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering if any
+        },
+    )
+
+
+class AnalyzeJobIn(BaseModel):
+    depth: int = 14
+    limit: int = 50
+    only_unanalyzed: bool = True
+    workers: int = 1
+    time_classes: Optional[list[str]] = None
+
+
+@app.post("/players/{username}/analyze", status_code=201)
+def start_analyze_job(username: str, body: AnalyzeJobIn) -> dict:
+    """Kick off a background analysis job. Returns the job snapshot.
+
+    The job runs detached from this request; clients can poll /jobs/{id} or
+    tail /jobs/{id}/stream. Closing the client does NOT stop the job.
+    """
+    username = username.strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="username required")
+    with conn_ctx() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM players WHERE username = ?", (username,)
+        ).fetchone():
+            raise HTTPException(status_code=404, detail="player not found")
+    params = {
+        "depth": body.depth,
+        "limit": body.limit,
+        "only_unanalyzed": body.only_unanalyzed,
+        "workers": body.workers,
+        "time_classes": body.time_classes,
+    }
+    try:
+        job = start_job(username, params)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return job.snapshot
+
+
+@app.get("/jobs/{job_id}")
+def get_job_snapshot(job_id: str) -> dict:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job.snapshot
+
+
+@app.post("/jobs/{job_id}/stop")
+def stop_job(job_id: str) -> dict:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    job.cancel.set()
+    return {"id": job.id, "status": "stopping"}
+
+
+@app.get("/jobs/{job_id}/stream")
+def stream_job_endpoint(job_id: str) -> StreamingResponse:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    def event_source():
+        for event in stream_job(job):
+            if event.get("type") == "heartbeat":
+                yield ": heartbeat\n\n"
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/players/{username}/jobs/active")
+def get_active_job_for_player(username: str) -> dict:
+    username = username.strip().lower()
+    job = active_job_for(username)
+    if not job:
+        raise HTTPException(status_code=404, detail="no active job")
+    return job.snapshot
+
+
+@app.get("/players/{username}/analyze/status")
+def analyze_player_status(username: str) -> dict:
+    username = username.strip().lower()
+    with conn_ctx() as conn:
+        row = conn.execute(
+            "SELECT username FROM players WHERE username = ?", (username,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="player not found")
+        total = conn.execute(
+            "SELECT COUNT(*) FROM games WHERE player_username = ?", (username,)
+        ).fetchone()[0]
+        analyzed = conn.execute(
+            "SELECT COUNT(DISTINCT a.game_id) FROM analyses a"
+            " JOIN games g ON g.id = a.game_id WHERE g.player_username = ?",
+            (username,),
+        ).fetchone()[0]
+    return {"username": username, "games": total, "analyzed": analyzed}
 
 
 @app.post("/games/{game_id}/analyze")
@@ -107,47 +261,63 @@ def get_player_patterns(username: str) -> dict:
             raise HTTPException(status_code=404, detail="player not found")
 
         rows = conn.execute(
-            "SELECT a.game_id, a.fen, a.motif_tags"
+            "SELECT a.game_id, a.fen, a.motif_tags, a.phase"
             " FROM analyses a"
             " JOIN games g ON g.id = a.game_id"
             " WHERE g.player_username = ?"
-            "   AND a.motif_tags IS NOT NULL"
             "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
             " ORDER BY a.game_id DESC",
             (username,),
         ).fetchall()
 
-    # Aggregate per motif
-    counts: dict[str, int] = defaultdict(int)
+    # Per-game dedup: each motif counted at most once per game. Density signal
+    # (how many times in a single game) is lost on purpose — for now this gives
+    # the more interpretable "how often does this pattern come up" number.
+    games_per_motif: dict[str, set[int]] = defaultdict(set)
     last_game: dict[str, int] = {}
     examples: dict[str, list] = defaultdict(list)
+    phase_counts: dict[str, int] = defaultdict(int)
 
+    # rows are already ORDER BY a.game_id DESC, so the first time we see a tag
+    # is the most recent game where it occurred.
     for r in rows:
         game_id = r["game_id"]
         fen = r["fen"]
+        phase = r["phase"] or "middlegame"
+        phase_counts[phase] += 1
+
+        if not r["motif_tags"]:
+            continue
         try:
             tags = json.loads(r["motif_tags"])
         except (json.JSONDecodeError, TypeError):
             continue
 
         for tag in tags:
-            counts[tag] += 1
+            already_seen_in_game = game_id in games_per_motif[tag]
+            games_per_motif[tag].add(game_id)
             if tag not in last_game:
                 last_game[tag] = game_id
-            if len(examples[tag]) < 3:
+            if not already_seen_in_game and len(examples[tag]) < 3:
                 examples[tag].append(fen)
 
     patterns = [
         {
             "motif": motif,
-            "count": counts[motif],
+            "count": len(games_per_motif[motif]),
             "last_seen_game_id": last_game.get(motif),
             "example_fens": examples[motif],
         }
-        for motif in sorted(counts, key=lambda m: counts[m], reverse=True)
+        for motif in sorted(
+            games_per_motif, key=lambda m: len(games_per_motif[m]), reverse=True
+        )
     ]
 
-    return {"username": username, "patterns": patterns}
+    return {
+        "username": username,
+        "patterns": patterns,
+        "phase_counts": dict(phase_counts),
+    }
 
 
 @app.get("/players/{username}/drill")

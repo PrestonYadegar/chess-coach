@@ -1,4 +1,5 @@
 import Link from "next/link";
+import AnalyzeAllButton from "./AnalyzeAllButton";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -12,16 +13,23 @@ interface Pattern {
 interface PatternsResponse {
   username: string;
   patterns: Pattern[];
+  phase_counts: Record<string, number>;
 }
 
 const MOTIF_LABELS: Record<string, string> = {
   hanging_piece: "Hanging Piece",
   fork_missed: "Fork Missed",
+  skewer_missed: "Skewer Missed",
   back_rank: "Back Rank",
   pin_missed: "Pin Missed",
   discovered_attack: "Discovered Attack",
   overloaded_piece: "Overloaded Piece",
+  intermezzo_missed: "Intermezzo Missed",
+  only_move_missed: "Only Move Missed",
+  mating_net_missed: "Mating Net Missed",
+  mating_net_allowed: "Mating Net Allowed",
   king_safety: "King Safety",
+  pawn_structure: "Pawn Structure",
   endgame_technique: "Endgame Technique",
   opening_principle: "Opening Principle",
 };
@@ -29,13 +37,25 @@ const MOTIF_LABELS: Record<string, string> = {
 const MOTIF_DESC: Record<string, string> = {
   hanging_piece: "Left a piece undefended or missed capturing a free piece.",
   fork_missed: "Missed a fork opportunity that wins material.",
+  skewer_missed: "Missed a long-range skewer through two enemy pieces.",
   back_rank: "Vulnerable or missed a back-rank mating threat.",
   pin_missed: "Missed pinning an opponent's piece to win material.",
   discovered_attack: "Missed or fell victim to a discovered attack.",
   overloaded_piece: "A piece was overloaded and couldn't defend everything.",
-  king_safety: "King was exposed or castling was neglected.",
-  endgame_technique: "Inaccurate technique in the endgame phase.",
-  opening_principle: "Violated an opening principle (development, center control, etc.).",
+  intermezzo_missed: "Played an obvious recapture instead of a forcing in-between move.",
+  only_move_missed: "Had a single best move (≥ 2 pawns better than alternatives); played something else.",
+  mating_net_missed: "Had a forced mate; played a move that gave it up.",
+  mating_net_allowed: "Walked into a forced mate against you.",
+  king_safety: "King was exposed or pawn shelter was weakened.",
+  pawn_structure: "Created doubled or isolated pawns without compensation.",
+  endgame_technique: "Pure pawn endgame mistake — technique failure.",
+  opening_principle: "Violated an opening principle (development, center control, early queen).",
+};
+
+const PHASE_LABELS: Record<string, string> = {
+  opening: "Opening",
+  middlegame: "Middlegame",
+  endgame: "Endgame",
 };
 
 function motifColor(index: number): string {
@@ -81,6 +101,9 @@ export default async function PatternsPage({
 
   const patterns = data?.patterns ?? [];
   const maxCount = patterns.length > 0 ? patterns[0].count : 1;
+  const phaseCounts = data?.phase_counts ?? {};
+  const phaseTotal = Object.values(phaseCounts).reduce((a, b) => a + b, 0);
+  const phaseOrder = ["opening", "middlegame", "endgame"] as const;
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-12">
@@ -93,9 +116,12 @@ export default async function PatternsPage({
         </Link>
         <h1 className="mt-2 text-3xl font-bold tracking-tight">Mistake Patterns</h1>
         <p className="mt-1 text-sm text-neutral-400">
-          Your most frequent error motifs across all analyzed games.
+          Your most frequent error motifs. Each count is the number of games
+          where the pattern appeared at least once.
         </p>
       </div>
+
+      <AnalyzeAllButton username={username} />
 
       {fetchError && (
         <p className="rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
@@ -107,15 +133,37 @@ export default async function PatternsPage({
         <div className="rounded-lg border border-neutral-800 px-6 py-12 text-center text-neutral-500">
           <p className="text-lg">No patterns found yet.</p>
           <p className="mt-2 text-sm">
-            Analyze some games first —{" "}
-            <Link
-              href={`/players/${encodeURIComponent(username)}`}
-              className="underline hover:text-neutral-300"
-            >
-              go to your game list
-            </Link>{" "}
-            and click into a game to run analysis.
+            Click <span className="font-semibold text-neutral-300">Analyze games</span> above
+            to run Stockfish on a batch and surface your motifs here.
           </p>
+        </div>
+      )}
+
+      {phaseTotal > 0 && (
+        <div className="mb-6 rounded-xl border border-neutral-800 bg-neutral-950 p-4">
+          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral-400">
+            Mistakes by phase
+          </h2>
+          <div className="space-y-2">
+            {phaseOrder.map((p) => {
+              const n = phaseCounts[p] ?? 0;
+              const pct = phaseTotal > 0 ? Math.round((n / phaseTotal) * 100) : 0;
+              return (
+                <div key={p} className="flex items-center gap-3 text-xs">
+                  <span className="w-24 text-neutral-300">{PHASE_LABELS[p]}</span>
+                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                    <div
+                      className="h-full bg-emerald-600"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="w-20 text-right tabular-nums text-neutral-500">
+                    {n} ({pct}%)
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -133,7 +181,7 @@ export default async function PatternsPage({
                 <div className="mb-3 flex items-start justify-between gap-2">
                   <h2 className="text-base font-semibold leading-tight">{label}</h2>
                   <span className="shrink-0 rounded-full bg-neutral-800 px-2.5 py-0.5 text-xs font-bold text-neutral-200">
-                    {p.count}×
+                    {p.count} {p.count === 1 ? "game" : "games"}
                   </span>
                 </div>
 
