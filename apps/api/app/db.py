@@ -61,5 +61,25 @@ def init_db() -> None:
                 FOREIGN KEY(game_id) REFERENCES games(id)
             );
             CREATE INDEX IF NOT EXISTS idx_analyses_game ON analyses(game_id);
+            CREATE TABLE IF NOT EXISTS puzzles (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL DEFAULT 'lichess',
+                fen TEXT NOT NULL,
+                solution_moves TEXT NOT NULL,
+                themes TEXT NOT NULL DEFAULT '[]',
+                rating INTEGER,
+                popularity INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_puzzles_themes ON puzzles(themes);
+            CREATE TABLE IF NOT EXISTS puzzle_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                puzzle_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                solved INTEGER NOT NULL,
+                attempted_at TEXT NOT NULL,
+                FOREIGN KEY(puzzle_id) REFERENCES puzzles(id),
+                FOREIGN KEY(username) REFERENCES players(username)
+            );
+            CREATE INDEX IF NOT EXISTS idx_attempts_user ON puzzle_attempts(username, attempted_at);
             """
         )

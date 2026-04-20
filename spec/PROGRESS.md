@@ -21,9 +21,9 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 - [x] Web: `/players/[username]/patterns` page.
 
 ## Phase 4 — Puzzles
-- [ ] Importer for Lichess open puzzle DB.
-- [ ] API: `GET /players/{username}/drill`.
-- [ ] API: `POST /puzzle_attempts`.
+- [x] Importer for Lichess open puzzle DB.
+- [x] API: `GET /players/{username}/drill`.
+- [x] API: `POST /puzzle_attempts`.
 - [ ] Web: `/players/[username]/drill` page.
 
 ## Phase 5 — MCP
@@ -47,3 +47,6 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 2026-06-13 11:00  API: motif tagger heuristics (9 tags) integrated into analyze pipeline  8ed817ecabe58d139d1f07b4e179443cd2898643
 2026-06-13 11:15  API: GET /players/{username}/patterns — motif aggregation endpoint  2933c6af9b20c538d2e71f308caa0f306cfec52d
 2026-06-13 11:30  Web: /players/[username]/patterns — motif cards page with frequency bar and drill CTA  ebfeddbabbce19050e121b6fd4120e9b8a3001ec
+2026-06-13 12:00  Lichess puzzle DB importer — puzzles/puzzle_attempts tables + streaming CSV import + smoke test  cd8160a770a5e4940af1752be9388b942e86dbd5
+2026-06-13 12:30  GET /players/{username}/drill — mixed puzzle queue from Lichess themes + own pre-blunder FENs  09db9578eb38551b90aadaed6b12aba4e9b24fb2
+2026-06-13 18:30  POST /puzzle_attempts — record solve/fail with player + puzzle validation  da0f7186f8a8656cf609e24571edead8de3182c3
