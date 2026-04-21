@@ -95,3 +95,9 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_attempts_user ON puzzle_attempts(username, attempted_at);
             """
         )
+        # Additive migration: opening_name / opening_ply on games.
+        game_cols = {r[1] for r in conn.execute("PRAGMA table_info(games)").fetchall()}
+        if "opening_name" not in game_cols:
+            conn.execute("ALTER TABLE games ADD COLUMN opening_name TEXT")
+        if "opening_ply" not in game_cols:
+            conn.execute("ALTER TABLE games ADD COLUMN opening_ply INTEGER")

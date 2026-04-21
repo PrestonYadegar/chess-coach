@@ -55,6 +55,23 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/players")
+def list_players() -> dict:
+    """All players that have been synced, with game + analysis counts."""
+    with conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT p.username, p.last_synced_at,"
+            "       COUNT(DISTINCT g.id) AS games,"
+            "       COUNT(DISTINCT a.game_id) AS analyzed"
+            " FROM players p"
+            " LEFT JOIN games g ON g.player_username = p.username"
+            " LEFT JOIN analyses a ON a.game_id = g.id"
+            " GROUP BY p.username"
+            " ORDER BY p.last_synced_at DESC NULLS LAST, p.username"
+        ).fetchall()
+    return {"players": [dict(r) for r in rows]}
+
+
 @app.post("/players/{username}/sync")
 def sync_player(username: str) -> dict:
     username = username.strip().lower()
@@ -227,7 +244,7 @@ def get_game_analysis(game_id: int) -> dict:
         if not game_row:
             raise HTTPException(status_code=404, detail="game not found")
         rows = conn.execute(
-            "SELECT ply, fen, best_move, played_move, eval_cp, classification, motif_tags"
+            "SELECT ply, fen, best_move, played_move, eval_cp, classification, motif_tags, phase"
             " FROM analyses WHERE game_id = ? ORDER BY ply",
             (game_id,),
         ).fetchall()
@@ -242,7 +259,8 @@ def get_game(game_id: int) -> dict:
     with conn_ctx() as conn:
         row = conn.execute(
             "SELECT id, player_username, chesscom_id, played_at, time_control,"
-            " white, black, result, eco, pgn FROM games WHERE id = ?",
+            " white, black, result, eco, opening_name, opening_ply, pgn"
+            " FROM games WHERE id = ?",
             (game_id,),
         ).fetchone()
     if not row:

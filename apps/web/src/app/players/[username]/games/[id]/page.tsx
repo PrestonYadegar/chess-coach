@@ -13,6 +13,8 @@ interface Game {
   black: string;
   result: string;
   eco: string | null;
+  opening_name: string | null;
+  opening_ply: number | null;
   pgn: string;
 }
 
@@ -24,6 +26,7 @@ export interface PlyAnalysis {
   eval_cp: number | null;
   classification: string | null;
   motif_tags: string | null;
+  phase: string | null;
 }
 
 function formatDate(iso: string | null): string {
@@ -118,7 +121,14 @@ export default async function GameDetailPage({
           <div className="mt-1 flex flex-wrap gap-4 text-sm text-neutral-500">
             <span>{formatDate(game.played_at)}</span>
             <span>{formatTimeControl(game.time_control)}</span>
-            {game.eco && <span>ECO: {game.eco}</span>}
+            {game.opening_name ? (
+              <span>
+                {game.opening_name}
+                {game.eco && <span className="text-neutral-600"> ({game.eco})</span>}
+              </span>
+            ) : (
+              game.eco && <span>ECO: {game.eco}</span>
+            )}
             <span className="font-mono text-neutral-600">{game.result}</span>
           </div>
         )}
@@ -131,7 +141,14 @@ export default async function GameDetailPage({
       )}
 
       {game && (
-        <GameViewer pgn={game.pgn} white={game.white} black={game.black} analysis={analysis} />
+        <GameViewer
+          pgn={game.pgn}
+          white={game.white}
+          black={game.black}
+          analysis={analysis}
+          gameId={game.id}
+          playerUsername={username}
+        />
       )}
     </main>
   );

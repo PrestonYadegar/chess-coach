@@ -24,12 +24,25 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 - [x] Importer for Lichess open puzzle DB.
 - [x] API: `GET /players/{username}/drill`.
 - [x] API: `POST /puzzle_attempts`.
-- [ ] Web: `/players/[username]/drill` page.
+- [x] Web: `/players/[username]/drill` page.
 
 ## Phase 5 — MCP
 - [ ] `apps/api/app/mcp_server.py` with the 7 tools listed in PRD.
 - [ ] README section: how to wire into Claude Desktop / Cursor.
 - [ ] End-to-end smoke test.
+
+## Phase 6 — Move explanations & interactive exploration
+Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for full acceptance criteria. Guiding principle: analysis only deepens/broadens — every engine evaluation routes through the position-keyed `engine_lines` cache and never recomputes what is already cached at ≥ the requested depth/breadth.
+- [ ] API: persist the engine PV — add `analyses.pv` (JSON UCI array, first 8 plies of `best_info["pv"]`), drop+rebuild migration on missing column, surface `pv` in `GET /games/{id}/analysis` and the web `PlyAnalysis` type.
+- [ ] API: `engine_lines` cache + persistent Stockfish singleton + cache-backed `evaluate_position(fen, depth, multipv)` service. Reads cache, computes only missing breadth/depth, upserts. One lock-guarded long-lived engine, no per-request popen.
+- [ ] API: `POST /positions/evaluate` — `{fen, depth?=18, multipv?=1}` → `{lines:[{rank, move_uci, move_san, eval_cp, mate, pv_uci, pv_san}], depth}` (white-POV, pv ≥5 plies when available), 400 on invalid FEN. Backed by the cache service.
+- [ ] API: motif evidence — enhance the motif tagger (or post-pass over PV+board) so each tag carries structured evidence (cited squares/pieces + exploiting UCI move/line). Persist as `analyses.motif_details` JSON, surface in `GET /games/{id}/analysis`.
+- [ ] MCP: `evaluate_position(fen)` + `explore_line(fen, moves[])` tools — route through the cache; return top-N candidates + lines; `explore_line` applies moves (illegal → error) and returns resulting FEN + eval + best continuation.
+- [ ] MCP: `explain_move(game_id, ply)` tool — structured fact bundle (played move SAN+UCI, eval before/after, swing, classification, phase, top-N candidate moves w/ SAN PVs from cache, motif evidence w/ cited squares + lines in SAN); tool description tells the LLM to explain from facts only.
+- [ ] Web: board overlays — draw best move as an arrow + highlight target square; selecting a motif highlights its cited squares/line. Overlays update while stepping through moves (`react-chessboard` customArrows/customSquareStyles).
+- [ ] Web: candidate moves in Move Detail — show top 3 candidates (best included) each with eval + clickable line ≥5 plies, previewed on the board; data from `POST /positions/evaluate` at multipv≥3.
+- [ ] Web: interactive motif chips — clicking a chip highlights exactly its cited squares/pieces on the board and shows its evidence; no motif may be a label with no on-board referent.
+- [ ] Web: "Explore from here" mode — toggle draggable pieces, branch a side-line off the current position (mainline untouched), live debounced eval + candidate update via `POST /positions/evaluate`, breadcrumb + "Return to game" reset, illegal moves snap back.
 
 ---
 
@@ -50,3 +63,4 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 2026-06-13 12:00  Lichess puzzle DB importer — puzzles/puzzle_attempts tables + streaming CSV import + smoke test  cd8160a770a5e4940af1752be9388b942e86dbd5
 2026-06-13 12:30  GET /players/{username}/drill — mixed puzzle queue from Lichess themes + own pre-blunder FENs  09db9578eb38551b90aadaed6b12aba4e9b24fb2
 2026-06-13 18:30  POST /puzzle_attempts — record solve/fail with player + puzzle validation  da0f7186f8a8656cf609e24571edead8de3182c3
+2026-06-14 00:00  Web: /players/[username]/drill — board + solve interaction + streak counter  47d0276cf841b131023e90617110781154831a6f
