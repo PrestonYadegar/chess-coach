@@ -3,10 +3,14 @@
 Tactical detectors run on every classified mistake. The two phase-context tags
 (endgame_technique, opening_principle) only fire when no tactical motif did,
 so they act as last-resort catch-alls rather than crowding the chart.
+
+Each detector now returns either None (did not fire) or a dict of structured
+evidence (squares, pieces, exploiting move/line). `tag_motifs` returns the list
+of tag names; `tag_motifs_with_details` returns (tags, details_dict).
 """
 
 import json
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import chess
 
@@ -19,6 +23,19 @@ PIECE_VALUE = {
     chess.QUEEN: 9,
     chess.KING: 100,
 }
+
+_PIECE_NAME = {
+    chess.PAWN: "pawn",
+    chess.KNIGHT: "knight",
+    chess.BISHOP: "bishop",
+    chess.ROOK: "rook",
+    chess.QUEEN: "queen",
+    chess.KING: "king",
+}
+
+
+def _sq_name(sq: chess.Square) -> str:
+    return chess.square_name(sq)
 
 
 def _material_count(board: chess.Board) -> int:
@@ -67,15 +84,20 @@ def _is_hanging(board: chess.Board, sq: chess.Square, color: chess.Color) -> boo
     return not board.attackers(color, sq)
 
 
-def _check_hanging_piece(
+def _detect_hanging_piece(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
-) -> bool:
+) -> Optional[dict]:
     """Player left the moved piece hanging, OR missed capturing a free opponent piece."""
     board_after = board_before.copy()
     board_after.push(played_move)
 
     if _is_hanging(board_after, played_move.to_square, mover):
-        return True
+        p = board_after.piece_at(played_move.to_square)
+        return {
+            "squares": [_sq_name(played_move.to_square)],
+            "piece": _PIECE_NAME.get(p.piece_type, "piece") if p else "piece",
+            "reason": "moved_piece_left_hanging",
+        }
 
     opp = not mover
     for sq in chess.SQUARES:
@@ -84,35 +106,38 @@ def _check_hanging_piece(
             continue
         if board_before.attackers(mover, sq) and not board_before.attackers(opp, sq):
             if played_move.to_square != sq:
-                return True
+                return {
+                    "squares": [_sq_name(sq)],
+                    "piece": _PIECE_NAME.get(p.piece_type, "piece"),
+                    "reason": "free_capture_missed",
+                }
 
-    return False
+    return None
 
 
-def _check_fork_missed(
+def _detect_fork_missed(
     board_before: chess.Board,
     played_move: chess.Move,
     best_move: Optional[chess.Move],
     mover: chess.Color,
-) -> bool:
+) -> Optional[dict]:
     if best_move is None or best_move == played_move:
-        return False
+        return None
 
     board_best = board_before.copy()
     board_best.push(best_move)
     to_sq = best_move.to_square
 
     opp = not mover
-    attacked = sum(
-        1
-        for sq in chess.SQUARES
+    forked = [
+        sq for sq in chess.SQUARES
         if (p := board_best.piece_at(sq)) is not None
         and p.color == opp
         and p.piece_type != chess.KING
         and to_sq in board_best.attackers(mover, sq)
-    )
-    if attacked < 2:
-        return False
+    ]
+    if len(forked) < 2:
+        return None
 
     board_play = board_before.copy()
     board_play.push(played_move)
@@ -125,7 +150,14 @@ def _check_fork_missed(
         and p.piece_type != chess.KING
         and to_sq_p in board_play.attackers(mover, sq)
     )
-    return attacked_play < 2
+    if attacked_play >= 2:
+        return None
+
+    return {
+        "fork_square": _sq_name(to_sq),
+        "targets": [_sq_name(sq) for sq in forked[:4]],
+        "by_move": best_move.uci(),
+    }
 
 
 _RAYS = {
@@ -168,60 +200,67 @@ def _skewer_pairs(
     return pairs
 
 
-def _has_skewer(
+def _has_skewer_detail(
     board: chess.Board, from_sq: chess.Square, color: chess.Color
-) -> bool:
+) -> Optional[Tuple[chess.Square, chess.Square]]:
     p = board.piece_at(from_sq)
     if p is None or p.piece_type not in _RAYS:
-        return False
+        return None
     for front_sq, back_sq in _skewer_pairs(board, from_sq, p.piece_type, color):
         fp = board.piece_at(front_sq)
         bp = board.piece_at(back_sq)
         if fp is None or bp is None:
             continue
-        # Front must be at least as valuable as back (definition of skewer);
-        # king-in-front is the absolute skewer case and always counts.
         if PIECE_VALUE[fp.piece_type] >= PIECE_VALUE[bp.piece_type]:
-            return True
-    return False
+            return (front_sq, back_sq)
+    return None
 
 
-def _check_skewer_missed(
+def _detect_skewer_missed(
     board_before: chess.Board,
     played_move: chess.Move,
     best_move: Optional[chess.Move],
     mover: chess.Color,
-) -> bool:
+) -> Optional[dict]:
     """Best move would land a long-range piece on a skewer line; played move doesn't."""
     if best_move is None or best_move == played_move:
-        return False
+        return None
     p = board_before.piece_at(best_move.from_square)
     if p is None or p.piece_type not in _RAYS:
-        return False
+        return None
 
     board_best = board_before.copy()
     board_best.push(best_move)
-    if not _has_skewer(board_best, best_move.to_square, mover):
-        return False
+    pair = _has_skewer_detail(board_best, best_move.to_square, mover)
+    if pair is None:
+        return None
 
     board_play = board_before.copy()
     board_play.push(played_move)
-    return not _has_skewer(board_play, played_move.to_square, mover)
+    if _has_skewer_detail(board_play, played_move.to_square, mover) is not None:
+        return None
+
+    front_sq, back_sq = pair
+    return {
+        "squares": [_sq_name(front_sq), _sq_name(back_sq)],
+        "by_move": best_move.uci(),
+        "attacker_square": _sq_name(best_move.to_square),
+    }
 
 
-def _check_back_rank(
+def _detect_back_rank(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
-) -> bool:
+) -> Optional[dict]:
     board_after = board_before.copy()
     board_after.push(played_move)
 
     king_sq = board_after.king(mover)
     if king_sq is None:
-        return False
+        return None
 
     back_rank = 0 if mover == chess.WHITE else 7
     if chess.square_rank(king_sq) != back_rank:
-        return False
+        return None
 
     opp = not mover
     king_file = chess.square_file(king_sq)
@@ -238,36 +277,41 @@ def _check_back_rank(
         and p.piece_type == chess.PAWN
     )
     if pawn_count < len(shield_squares):
-        return False
+        return None
 
+    threatening = []
     for sq in chess.SQUARES:
         p = board_after.piece_at(sq)
         if p is None or p.color != opp:
             continue
         if p.piece_type not in (chess.ROOK, chess.QUEEN):
             continue
-        if chess.square_rank(sq) == back_rank:
-            return True
-        if board_after.is_attacked_by(opp, king_sq):
-            return True
+        if chess.square_rank(sq) == back_rank or board_after.is_attacked_by(opp, king_sq):
+            threatening.append(_sq_name(sq))
 
-    return False
+    if not threatening:
+        return None
+
+    return {
+        "king_square": _sq_name(king_sq),
+        "squares": threatening,
+    }
 
 
-def _check_pin_missed(
+def _detect_pin_missed(
     board_before: chess.Board,
     played_move: chess.Move,
     best_move: Optional[chess.Move],
     mover: chess.Color,
-) -> bool:
+) -> Optional[dict]:
     if best_move is None or best_move == played_move:
-        return False
+        return None
 
     moving_piece = board_before.piece_at(best_move.from_square)
     if moving_piece is None or moving_piece.piece_type not in (
         chess.BISHOP, chess.ROOK, chess.QUEEN
     ):
-        return False
+        return None
 
     opp = not mover
 
@@ -277,64 +321,79 @@ def _check_pin_missed(
     board_play = board_before.copy()
     board_play.push(played_move)
 
-    def pinned_count(b: chess.Board) -> int:
-        return sum(
-            1 for sq in chess.SQUARES
+    def pinned_pieces(b: chess.Board) -> List[chess.Square]:
+        return [
+            sq for sq in chess.SQUARES
             if (p := b.piece_at(sq)) is not None
             and p.color == opp and b.is_pinned(opp, sq)
-        )
+        ]
 
-    return pinned_count(board_best) > pinned_count(board_play)
+    pins_best = pinned_pieces(board_best)
+    pins_play = pinned_pieces(board_play)
+
+    if len(pins_best) <= len(pins_play):
+        return None
+
+    new_pins = [sq for sq in pins_best if sq not in pins_play]
+    return {
+        "by_move": best_move.uci(),
+        "pinned_squares": [_sq_name(sq) for sq in new_pins],
+        "attacker_square": _sq_name(best_move.to_square),
+    }
 
 
-def _check_discovered_attack(
+def _detect_discovered_attack(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
-) -> bool:
+) -> Optional[dict]:
     opp = not mover
     to_sq = played_move.to_square
 
     board_after = board_before.copy()
     board_after.push(played_move)
 
+    targets = []
     for sq in chess.SQUARES:
         p = board_after.piece_at(sq)
         if p is None or p.color != opp or p.piece_type == chess.KING:
             continue
 
-        before_att = board_before.attackers(mover, sq)
-        after_att = board_after.attackers(mover, sq)
-
-        new_att = set(after_att) - set(before_att)
+        before_att = set(board_before.attackers(mover, sq))
+        after_att = set(board_after.attackers(mover, sq))
+        new_att = after_att - before_att
         for att_sq in new_att:
             if att_sq != to_sq:
-                return True
+                targets.append({"target": _sq_name(sq), "uncovered_attacker": _sq_name(att_sq)})
 
-    return False
+    if not targets:
+        return None
+
+    return {
+        "moved_from": _sq_name(played_move.from_square),
+        "moved_to": _sq_name(played_move.to_square),
+        "discovered_attacks": targets[:3],
+    }
 
 
-def _check_overloaded(
+def _detect_overloaded(
     board_before: chess.Board,
     played_move: chess.Move,
     best_move: Optional[chess.Move],
     mover: chess.Color,
-) -> bool:
-    """Best move captures a piece whose defender also defends another piece we
-    attack — pulling the defender off its second duty. Played move doesn't take
-    this capture."""
+) -> Optional[dict]:
     if best_move is None or best_move == played_move:
-        return False
+        return None
     if not board_before.is_capture(best_move):
-        return False
+        return None
 
     target_sq = best_move.to_square
     target_piece = board_before.piece_at(target_sq)
     if target_piece is None or target_piece.color == mover:
-        return False
+        return None
 
     opp = not mover
     defenders = board_before.attackers(opp, target_sq)
     if not defenders:
-        return False
+        return None
 
     for def_sq in defenders:
         for sq in chess.SQUARES:
@@ -343,108 +402,107 @@ def _check_overloaded(
             p = board_before.piece_at(sq)
             if p is None or p.color != opp or p.piece_type == chess.KING:
                 continue
-            # Same defender also defends `sq`, AND we attack `sq`. Capturing
-            # target_sq forces the defender to either recapture or save `sq`,
-            # not both.
-            if def_sq in board_before.attackers(opp, sq) and board_before.attackers(
-                mover, sq
-            ):
-                return True
+            if def_sq in board_before.attackers(opp, sq) and board_before.attackers(mover, sq):
+                return {
+                    "target": _sq_name(target_sq),
+                    "overloaded_defender": _sq_name(def_sq),
+                    "also_defends": _sq_name(sq),
+                    "by_move": best_move.uci(),
+                }
 
-    return False
+    return None
 
 
-def _check_intermezzo_missed(
+def _detect_intermezzo_missed(
     board_before: chess.Board,
     played_move: chess.Move,
     best_move: Optional[chess.Move],
     mover: chess.Color,
-) -> bool:
-    """Best move is a forcing check that the player ignored to play an 'obvious'
-    recapture instead — the classic zwischenzug pattern."""
+) -> Optional[dict]:
     if best_move is None or best_move == played_move:
-        return False
+        return None
     if not board_before.gives_check(best_move):
-        return False
+        return None
     if board_before.gives_check(played_move):
-        return False
-    # The "missed intermezzo" framing requires the played move to look like the
-    # obvious continuation — typically a recapture.
-    return board_before.is_capture(played_move)
+        return None
+    if not board_before.is_capture(played_move):
+        return None
+    return {
+        "by_move": best_move.uci(),
+        "missed_check": True,
+    }
 
 
-def _check_only_move_missed(
+def _detect_only_move_missed(
     score_before: Optional["chess.engine.PovScore"],
     second_pv_score: Optional["chess.engine.PovScore"],
     played_move: chess.Move,
     best_move: Optional[chess.Move],
-) -> bool:
-    """The position had one stand-out move (≥ 2-pawn gap to the runner-up) and
-    the player chose something else. Captures the 'only defense missed'
-    pattern — but also fires when there's a single winning shot."""
+) -> Optional[dict]:
     if (
         best_move is None
         or second_pv_score is None
         or score_before is None
         or played_move == best_move
     ):
-        return False
-    # Mate situations are owned by the mating-net detectors.
+        return None
     if score_before.is_mate() or second_pv_score.is_mate():
-        return False
+        return None
     sb = score_before.score()
     s2 = second_pv_score.score()
     if sb is None or s2 is None:
-        return False
-    return (sb - s2) >= 200
+        return None
+    if (sb - s2) < 200:
+        return None
+    return {
+        "by_move": best_move.uci(),
+        "gap_cp": sb - s2,
+    }
 
 
-def _check_mating_net_missed(
+def _detect_mating_net_missed(
     score_before: Optional["chess.engine.PovScore"],
     score_after: Optional["chess.engine.PovScore"],
-) -> bool:
-    """Best line had a forced mate FOR the mover; played move threw it away."""
+) -> Optional[dict]:
     if score_before is None or not score_before.is_mate():
-        return False
+        return None
     m = score_before.mate()
     if m is None or m <= 0:
-        return False
+        return None
     if score_after is not None and score_after.is_mate():
         m_after = score_after.mate()
         if m_after is not None and m_after > 0:
-            return False  # still mating, just a delay
-    return True
+            return None
+    return {"mate_in": m}
 
 
-def _check_mating_net_allowed(
+def _detect_mating_net_allowed(
     score_before: Optional["chess.engine.PovScore"],
     score_after: Optional["chess.engine.PovScore"],
-) -> bool:
-    """Position was not already lost-to-mate; played move now is."""
+) -> Optional[dict]:
     if score_before is not None and score_before.is_mate():
         m = score_before.mate()
         if m is not None and m < 0:
-            return False  # already getting mated, not a fresh blunder
+            return None
     if score_after is None or not score_after.is_mate():
-        return False
+        return None
     m_after = score_after.mate()
-    return m_after is not None and m_after < 0
+    if m_after is None or m_after >= 0:
+        return None
+    return {"opponent_mate_in": abs(m_after)}
 
 
-def _check_king_safety(
+def _detect_king_safety(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
-) -> bool:
+) -> Optional[dict]:
     board_after = board_before.copy()
     board_after.push(played_move)
 
     king_sq = board_after.king(mover)
     if king_sq is None:
-        return False
+        return None
 
     opp = not mover
-    # Only treat as a castled-king position if the king is on a typical
-    # castled square. Otherwise the e-pawn push from the start would always
-    # count as breaking the pawn shield, which it isn't.
     castled_squares = (
         (chess.G1, chess.C1) if mover == chess.WHITE else (chess.G8, chess.C8)
     )
@@ -467,19 +525,25 @@ def _check_king_safety(
             and p.color == mover and p.piece_type == chess.PAWN
         )
         if pawns_after < pawns_before:
-            return True
+            return {
+                "king_square": _sq_name(king_sq),
+                "reason": "pawn_shield_broken",
+                "shield_squares": [_sq_name(sq) for sq in shield_squares],
+            }
 
     if played_move.from_square == board_before.king(mover):
         attackers_on_dest = len(board_after.attackers(opp, king_sq))
         if attackers_on_dest >= 2:
-            return True
+            return {
+                "king_square": _sq_name(king_sq),
+                "reason": "king_moved_into_danger",
+                "attacker_count": attackers_on_dest,
+            }
 
-    return False
+    return None
 
 
 def _pawn_weakness_count(board: chess.Board, color: chess.Color) -> int:
-    """Doubled + isolated pawns for `color`. Backward pawn detection is skipped
-    (hard to do without false positives at heuristic speed)."""
     pawn_squares = board.pieces(chess.PAWN, color)
     file_counts = [0] * 8
     for sq in pawn_squares:
@@ -496,39 +560,49 @@ def _pawn_weakness_count(board: chess.Board, color: chess.Color) -> int:
     return doubled + isolated
 
 
-def _check_pawn_structure(
+def _detect_pawn_structure(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
-) -> bool:
-    """The move left mover's pawn structure measurably worse (doubled/isolated)."""
+) -> Optional[dict]:
     board_after = board_before.copy()
     board_after.push(played_move)
-    return _pawn_weakness_count(board_after, mover) > _pawn_weakness_count(
-        board_before, mover
-    )
+    before_count = _pawn_weakness_count(board_before, mover)
+    after_count = _pawn_weakness_count(board_after, mover)
+    if after_count <= before_count:
+        return None
+    # Collect newly weakened pawn squares
+    weak_after = [
+        sq for sq in board_after.pieces(chess.PAWN, mover)
+        if _pawn_weakness_count(
+            board_after, mover
+        ) > before_count
+    ]
+    return {
+        "weaknesses_before": before_count,
+        "weaknesses_after": after_count,
+        "moved_pawn": _sq_name(played_move.to_square),
+    }
 
 
 # ── Catch-alls (only fire when no tactical motif did) ───────────────────────
 
 
-def _check_endgame_technique(board_before: chess.Board) -> bool:
-    """Pure-pawn or near-pure-pawn endgame mistake — actual technique failure."""
-    # No pieces other than king + pawn for either side
+def _detect_endgame_technique(board_before: chess.Board) -> Optional[dict]:
     for color in (chess.WHITE, chess.BLACK):
         for pt in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
             if board_before.pieces(pt, color):
-                return False
-    return True
+                return None
+    return {"phase": "endgame"}
 
 
-def _check_opening_principle(
+def _detect_opening_principle(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
-) -> bool:
+) -> Optional[dict]:
     if board_before.fullmove_number > 12:
-        return False
+        return None
 
     piece = board_before.piece_at(played_move.from_square)
     if piece is None:
-        return False
+        return None
 
     start_rank = 0 if mover == chess.WHITE else 7
 
@@ -542,7 +616,11 @@ def _check_opening_principle(
                 and chess.square_rank(sq) == start_rank
             )
             if undeveloped >= 2:
-                return True
+                return {
+                    "reason": "moved_developed_piece_with_undeveloped_pieces",
+                    "undeveloped_count": undeveloped,
+                    "fullmove": board_before.fullmove_number,
+                }
 
     if piece.piece_type == chess.QUEEN and board_before.fullmove_number <= 5:
         undeveloped = sum(
@@ -553,12 +631,82 @@ def _check_opening_principle(
             and chess.square_rank(sq) == start_rank
         )
         if undeveloped >= 2:
-            return True
+            return {
+                "reason": "early_queen_development",
+                "undeveloped_count": undeveloped,
+                "fullmove": board_before.fullmove_number,
+            }
 
-    return False
+    return None
 
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
+
+
+def tag_motifs_with_details(
+    board_before: chess.Board,
+    played_move: chess.Move,
+    best_move: Optional[chess.Move],
+    classification: str,
+    *,
+    score_before: Optional["chess.engine.PovScore"] = None,
+    score_after: Optional["chess.engine.PovScore"] = None,
+    second_pv_score: Optional["chess.engine.PovScore"] = None,
+    phase: str = "middlegame",
+) -> Tuple[List[str], Dict[str, dict]]:
+    """Return (tags, details) where details maps each tag name to its evidence dict."""
+    if classification not in ("blunder", "mistake", "inaccuracy"):
+        return [], {}
+
+    mover = board_before.turn
+    tags: List[str] = []
+    details: Dict[str, dict] = {}
+
+    checks = [
+        ("hanging_piece", lambda: _detect_hanging_piece(board_before, played_move, mover)),
+        ("fork_missed", lambda: _detect_fork_missed(board_before, played_move, best_move, mover)),
+        ("skewer_missed", lambda: _detect_skewer_missed(board_before, played_move, best_move, mover)),
+        ("pin_missed", lambda: _detect_pin_missed(board_before, played_move, best_move, mover)),
+        ("back_rank", lambda: _detect_back_rank(board_before, played_move, mover)),
+        ("discovered_attack", lambda: _detect_discovered_attack(board_before, played_move, mover)),
+        ("overloaded_piece", lambda: _detect_overloaded(board_before, played_move, best_move, mover)),
+        ("intermezzo_missed", lambda: _detect_intermezzo_missed(board_before, played_move, best_move, mover)),
+        ("only_move_missed", lambda: _detect_only_move_missed(score_before, second_pv_score, played_move, best_move)),
+        ("mating_net_missed", lambda: _detect_mating_net_missed(score_before, score_after)),
+        ("mating_net_allowed", lambda: _detect_mating_net_allowed(score_before, score_after)),
+        ("king_safety", lambda: _detect_king_safety(board_before, played_move, mover)),
+        ("pawn_structure", lambda: _detect_pawn_structure(board_before, played_move, mover)),
+    ]
+
+    for name, fn in checks:
+        try:
+            evidence = fn()
+            if evidence is not None:
+                tags.append(name)
+                details[name] = evidence
+        except Exception:
+            pass
+
+    # Catch-alls only fire when no specific motif did.
+    if not tags:
+        if phase == "endgame":
+            try:
+                evidence = _detect_endgame_technique(board_before)
+                if evidence is not None:
+                    tags.append("endgame_technique")
+                    details["endgame_technique"] = evidence
+            except Exception:
+                pass
+        elif phase == "opening":
+            try:
+                evidence = _detect_opening_principle(board_before, played_move, mover)
+                if evidence is not None:
+                    tags.append("opening_principle")
+                    details["opening_principle"] = evidence
+            except Exception:
+                pass
+
+    return tags, details
 
 
 def tag_motifs(
@@ -572,57 +720,12 @@ def tag_motifs(
     second_pv_score: Optional["chess.engine.PovScore"] = None,
     phase: str = "middlegame",
 ) -> List[str]:
-    """Return heuristic motif tags for a classified mistake move.
-
-    Scores are all from the mover's point of view. `score_after` is the eval
-    AFTER `played_move` from the same mover's POV (engine returns it from the
-    new side-to-move's POV, so the caller flips it).
-    """
-    if classification not in ("blunder", "mistake", "inaccuracy"):
-        return []
-
-    mover = board_before.turn
-    tags: List[str] = []
-
-    checks = [
-        ("hanging_piece", lambda: _check_hanging_piece(board_before, played_move, mover)),
-        ("fork_missed", lambda: _check_fork_missed(board_before, played_move, best_move, mover)),
-        ("skewer_missed", lambda: _check_skewer_missed(board_before, played_move, best_move, mover)),
-        ("pin_missed", lambda: _check_pin_missed(board_before, played_move, best_move, mover)),
-        ("back_rank", lambda: _check_back_rank(board_before, played_move, mover)),
-        ("discovered_attack", lambda: _check_discovered_attack(board_before, played_move, mover)),
-        ("overloaded_piece", lambda: _check_overloaded(board_before, played_move, best_move, mover)),
-        ("intermezzo_missed", lambda: _check_intermezzo_missed(board_before, played_move, best_move, mover)),
-        ("only_move_missed", lambda: _check_only_move_missed(score_before, second_pv_score, played_move, best_move)),
-        ("mating_net_missed", lambda: _check_mating_net_missed(score_before, score_after)),
-        ("mating_net_allowed", lambda: _check_mating_net_allowed(score_before, score_after)),
-        ("king_safety", lambda: _check_king_safety(board_before, played_move, mover)),
-        ("pawn_structure", lambda: _check_pawn_structure(board_before, played_move, mover)),
-    ]
-
-    for name, fn in checks:
-        try:
-            if fn():
-                tags.append(name)
-        except Exception:
-            pass
-
-    # Catch-alls only fire when no specific motif did — otherwise they'd
-    # crowd the chart with phase context that's already covered by `phase`.
-    if not tags:
-        if phase == "endgame":
-            try:
-                if _check_endgame_technique(board_before):
-                    tags.append("endgame_technique")
-            except Exception:
-                pass
-        elif phase == "opening":
-            try:
-                if _check_opening_principle(board_before, played_move, mover):
-                    tags.append("opening_principle")
-            except Exception:
-                pass
-
+    """Return heuristic motif tags for a classified mistake move (tags only)."""
+    tags, _ = tag_motifs_with_details(
+        board_before, played_move, best_move, classification,
+        score_before=score_before, score_after=score_after,
+        second_pv_score=second_pv_score, phase=phase,
+    )
     return tags
 
 

@@ -27,18 +27,18 @@ The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item bel
 - [x] Web: `/players/[username]/drill` page.
 
 ## Phase 5 — MCP
-- [ ] `apps/api/app/mcp_server.py` with the 7 tools listed in PRD.
-- [ ] README section: how to wire into Claude Desktop / Cursor.
-- [ ] End-to-end smoke test.
+- [x] `apps/api/app/mcp_server.py` with the 7 tools listed in PRD.
+- [x] README section: how to wire into Claude Desktop / Cursor.
+- [x] End-to-end smoke test.
 
 ## Phase 6 — Move explanations & interactive exploration
 Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for full acceptance criteria. Guiding principle: analysis only deepens/broadens — every engine evaluation routes through the position-keyed `engine_lines` cache and never recomputes what is already cached at ≥ the requested depth/breadth.
-- [ ] API: persist the engine PV — add `analyses.pv` (JSON UCI array, first 8 plies of `best_info["pv"]`), drop+rebuild migration on missing column, surface `pv` in `GET /games/{id}/analysis` and the web `PlyAnalysis` type.
-- [ ] API: `engine_lines` cache + persistent Stockfish singleton + cache-backed `evaluate_position(fen, depth, multipv)` service. Reads cache, computes only missing breadth/depth, upserts. One lock-guarded long-lived engine, no per-request popen.
-- [ ] API: `POST /positions/evaluate` — `{fen, depth?=18, multipv?=1}` → `{lines:[{rank, move_uci, move_san, eval_cp, mate, pv_uci, pv_san}], depth}` (white-POV, pv ≥5 plies when available), 400 on invalid FEN. Backed by the cache service.
-- [ ] API: motif evidence — enhance the motif tagger (or post-pass over PV+board) so each tag carries structured evidence (cited squares/pieces + exploiting UCI move/line). Persist as `analyses.motif_details` JSON, surface in `GET /games/{id}/analysis`.
-- [ ] MCP: `evaluate_position(fen)` + `explore_line(fen, moves[])` tools — route through the cache; return top-N candidates + lines; `explore_line` applies moves (illegal → error) and returns resulting FEN + eval + best continuation.
-- [ ] MCP: `explain_move(game_id, ply)` tool — structured fact bundle (played move SAN+UCI, eval before/after, swing, classification, phase, top-N candidate moves w/ SAN PVs from cache, motif evidence w/ cited squares + lines in SAN); tool description tells the LLM to explain from facts only.
+- [x] API: persist the engine PV — add `analyses.pv` (JSON UCI array, first 8 plies of `best_info["pv"]`), drop+rebuild migration on missing column, surface `pv` in `GET /games/{id}/analysis` and the web `PlyAnalysis` type.
+- [x] API: `engine_lines` cache + persistent Stockfish singleton + cache-backed `evaluate_position(fen, depth, multipv)` service. Reads cache, computes only missing breadth/depth, upserts. One lock-guarded long-lived engine, no per-request popen.
+- [x] API: `POST /positions/evaluate` — `{fen, depth?=18, multipv?=1}` → `{lines:[{rank, move_uci, move_san, eval_cp, mate, pv_uci, pv_san}], depth}` (white-POV, pv ≥5 plies when available), 400 on invalid FEN. Backed by the cache service.
+- [x] API: motif evidence — enhance the motif tagger (or post-pass over PV+board) so each tag carries structured evidence (cited squares/pieces + exploiting UCI move/line). Persist as `analyses.motif_details` JSON, surface in `GET /games/{id}/analysis`.
+- [x] MCP: `evaluate_position(fen)` + `explore_line(fen, moves[])` tools — route through the cache; return top-N candidates + lines; `explore_line` applies moves (illegal → error) and returns resulting FEN + eval + best continuation.
+- [x] MCP: `explain_move(game_id, ply)` tool — structured fact bundle (played move SAN+UCI, eval before/after, swing, classification, phase, top-N candidate moves w/ SAN PVs from cache, motif evidence w/ cited squares + lines in SAN); tool description tells the LLM to explain from facts only.
 - [ ] Web: board overlays — draw best move as an arrow + highlight target square; selecting a motif highlights its cited squares/line. Overlays update while stepping through moves (`react-chessboard` customArrows/customSquareStyles).
 - [ ] Web: candidate moves in Move Detail — show top 3 candidates (best included) each with eval + clickable line ≥5 plies, previewed on the board; data from `POST /positions/evaluate` at multipv≥3.
 - [ ] Web: interactive motif chips — clicking a chip highlights exactly its cited squares/pieces on the board and shows its evidence; no motif may be a label with no on-board referent.
@@ -64,3 +64,12 @@ Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for ful
 2026-06-13 12:30  GET /players/{username}/drill — mixed puzzle queue from Lichess themes + own pre-blunder FENs  09db9578eb38551b90aadaed6b12aba4e9b24fb2
 2026-06-13 18:30  POST /puzzle_attempts — record solve/fail with player + puzzle validation  da0f7186f8a8656cf609e24571edead8de3182c3
 2026-06-14 00:00  Web: /players/[username]/drill — board + solve interaction + streak counter  47d0276cf841b131023e90617110781154831a6f
+2026-06-14 06:00  MCP server: apps/api/app/mcp_server.py with 7 tools (list_games, get_game_pgn, get_game_analysis, get_mistake_history, get_top_patterns, next_puzzle, submit_puzzle_attempt)  3acb07718a40c216500852789d93a291c4d5a4b4
+2026-06-14 07:00  README section: MCP server setup for Claude Desktop and Cursor with tool table  2fcce0a3e57f009c8efd655919cce25319e700c5
+2026-06-14 08:00  MCP end-to-end smoke test: initialize + tools/list + list_games + get_game_analysis  ddfe4e16238bfebb90b9b2a262ea51f65fbef3ec
+2026-06-14 09:00  API: analyses.pv column (JSON UCI array ≤8 plies), drop+rebuild migration, surface in GET /games/{id}/analysis and web PlyAnalysis type  79de0c6b1bf6dd869d3366c736e39307dd07084c
+2026-06-14 10:00  API: engine_lines cache table + persistent Stockfish singleton + cache-backed evaluate_position service  ec2442447980c701158b1e845f75c861bf43cc22
+2026-06-14 11:00  API: POST /positions/evaluate — FEN evaluation endpoint with UCI+SAN lines, white-POV evals, cache-backed  94a71daf45ebe6de6c186174b9273b4ba37937e4
+2026-06-14 12:00  API: motif evidence — structured evidence per tag (squares, pieces, exploiting move), analyses.motif_details JSON column, surfaced in GET /games/{id}/analysis  0b7b6fe5b21fb0dd690e87d48d79934b106b1c35
+2026-06-14 13:00  MCP: evaluate_position + explore_line tools — cache-backed, top-N candidates + SAN/UCI lines, illegal move detection  edaa3977a497fbe808b938d201c820758968b213
+2026-06-14 14:00  MCP: explain_move tool — structured fact bundle with played/best move SAN, eval swing, candidates, motif evidence  d8f116886b094b82af74122fba4995630ab4172c

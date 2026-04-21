@@ -1,6 +1,7 @@
 """Stockfish per-ply analysis for a single game."""
 import concurrent.futures as cf
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -11,7 +12,9 @@ import chess
 import chess.engine
 import chess.pgn
 
-from .motif import compute_phase, encode_tags, tag_motifs
+from .motif import compute_phase, encode_tags, tag_motifs_with_details
+
+_PV_MAX_PLIES = 8
 
 
 STOCKFISH_PATH = shutil.which("stockfish")
@@ -112,6 +115,7 @@ def _analyze_pgn_rows(
 
         pv = best_info.get("pv")
         best_move_uci = pv[0].uci() if pv else played_move_uci
+        pv_uci_json = json.dumps([m.uci() for m in (pv or [])[:_PV_MAX_PLIES]])
 
         phase = compute_phase(board)
         board.push(move)
@@ -146,7 +150,7 @@ def _analyze_pgn_rows(
 
         best_move_obj = chess.Move.from_uci(best_move_uci) if best_move_uci else None
         board_for_tags = chess.Board(fen_before)
-        motif_list = tag_motifs(
+        motif_list, motif_details = tag_motifs_with_details(
             board_for_tags,
             move,
             best_move_obj,
@@ -157,6 +161,7 @@ def _analyze_pgn_rows(
             phase=phase,
         )
         motif_tags_json = encode_tags(motif_list)
+        motif_details_json = json.dumps(motif_details) if motif_details else None
 
         rows.append((
             game_id,
@@ -168,6 +173,8 @@ def _analyze_pgn_rows(
             classification,
             motif_tags_json,
             phase,
+            pv_uci_json,
+            motif_details_json,
         ))
 
         # Carry forward: the eval/pv we just computed for the resulting position
@@ -182,8 +189,8 @@ def _write_rows(conn: sqlite3.Connection, game_id: int, rows: list[tuple]) -> in
     conn.executemany(
         "INSERT OR REPLACE INTO analyses"
         " (game_id, ply, fen, best_move, played_move, eval_cp, classification,"
-        "  motif_tags, phase)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  motif_tags, phase, pv, motif_details)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)

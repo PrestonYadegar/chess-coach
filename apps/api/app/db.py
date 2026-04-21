@@ -35,7 +35,7 @@ def init_db() -> None:
         ).fetchone()
         if existing:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()}
-            if "phase" not in cols:
+            if "phase" not in cols or "pv" not in cols or "motif_details" not in cols:
                 conn.execute("DROP TABLE analyses")
         conn.executescript(
             """
@@ -68,6 +68,8 @@ def init_db() -> None:
                 classification TEXT,
                 motif_tags TEXT,
                 phase TEXT,
+                pv TEXT,
+                motif_details TEXT,
                 PRIMARY KEY (game_id, ply),
                 FOREIGN KEY(game_id) REFERENCES games(id)
             );
@@ -101,3 +103,20 @@ def init_db() -> None:
             conn.execute("ALTER TABLE games ADD COLUMN opening_name TEXT")
         if "opening_ply" not in game_cols:
             conn.execute("ALTER TABLE games ADD COLUMN opening_ply INTEGER")
+
+        # engine_lines: position-keyed analysis cache.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS engine_lines (
+                fen TEXT NOT NULL,
+                multipv_rank INTEGER NOT NULL,
+                move_uci TEXT NOT NULL,
+                eval_cp INTEGER,
+                mate INTEGER,
+                pv TEXT NOT NULL DEFAULT '[]',
+                depth INTEGER NOT NULL,
+                computed_at TEXT NOT NULL,
+                PRIMARY KEY (fen, multipv_rank)
+            )
+            """
+        )

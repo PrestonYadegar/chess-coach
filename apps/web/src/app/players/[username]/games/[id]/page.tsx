@@ -27,6 +27,8 @@ export interface PlyAnalysis {
   classification: string | null;
   motif_tags: string | null;
   phase: string | null;
+  pv: string | null;
+  motif_details: string | null;
 }
 
 function formatDate(iso: string | null): string {

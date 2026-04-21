@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
 
+import chess
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -13,6 +14,7 @@ import httpx
 from .analyze import analyze_game
 from .chesscom import sync_player_games, sync_player_games_events
 from .db import conn_ctx, init_db
+from .engine_cache import evaluate_position, shutdown_engine
 from .jobs import active_job_for, get_job, start_job, stream as stream_job
 
 # Map our 9 internal motif tags → Lichess theme keywords (used for LIKE search)
@@ -48,6 +50,11 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    shutdown_engine()
 
 
 @app.get("/health")
@@ -244,7 +251,8 @@ def get_game_analysis(game_id: int) -> dict:
         if not game_row:
             raise HTTPException(status_code=404, detail="game not found")
         rows = conn.execute(
-            "SELECT ply, fen, best_move, played_move, eval_cp, classification, motif_tags, phase"
+            "SELECT ply, fen, best_move, played_move, eval_cp, classification,"
+            " motif_tags, phase, pv, motif_details"
             " FROM analyses WHERE game_id = ? ORDER BY ply",
             (game_id,),
         ).fetchall()
@@ -496,6 +504,78 @@ def record_puzzle_attempt(body: PuzzleAttemptIn) -> dict:
         "solved": body.solved,
         "attempted_at": now,
     }
+
+
+class EvaluatePositionIn(BaseModel):
+    fen: str
+    depth: int = 18
+    multipv: int = 1
+
+
+def _uci_to_san(board: chess.Board, uci_moves: list[str]) -> list[str]:
+    """Apply UCI moves from `board` (copied) and return SAN strings."""
+    b = board.copy()
+    san_moves = []
+    for uci in uci_moves:
+        try:
+            move = chess.Move.from_uci(uci)
+            san_moves.append(b.san(move))
+            b.push(move)
+        except (ValueError, AssertionError):
+            break
+    return san_moves
+
+
+@app.post("/positions/evaluate")
+def evaluate_position_endpoint(body: EvaluatePositionIn) -> dict:
+    """Evaluate a FEN position and return the top candidate lines.
+
+    Response: {lines: [{rank, move_uci, move_san, eval_cp, mate, pv_uci, pv_san}], depth}
+    eval_cp is white-POV (null on mate). mate is signed mate-in-N (null otherwise).
+    pv contains >= 5 plies when available.
+    Returns 400 on invalid FEN.
+    """
+    try:
+        board = chess.Board(body.fen)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"invalid FEN: {e}")
+
+    if body.depth < 1 or body.depth > 30:
+        raise HTTPException(status_code=400, detail="depth must be 1–30")
+    if body.multipv < 1 or body.multipv > 10:
+        raise HTTPException(status_code=400, detail="multipv must be 1–10")
+
+    try:
+        raw_lines = evaluate_position(body.fen, depth=body.depth, multipv=body.multipv)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    lines = []
+    for line in raw_lines:
+        pv_uci = line["pv"]
+        move_uci = line["move_uci"]
+        # Compute SAN for the first (best) move
+        try:
+            move_san = board.san(chess.Move.from_uci(move_uci)) if move_uci else ""
+        except (ValueError, AssertionError):
+            move_san = move_uci
+        pv_san = _uci_to_san(board, pv_uci)
+        lines.append(
+            {
+                "rank": line["rank"],
+                "move_uci": move_uci,
+                "move_san": move_san,
+                "eval_cp": line["eval_cp"],
+                "mate": line["mate"],
+                "pv_uci": pv_uci,
+                "pv_san": pv_san,
+            }
+        )
+
+    actual_depth = raw_lines[0]["depth"] if raw_lines else body.depth
+    return {"lines": lines, "depth": actual_depth}
 
 
 @app.get("/players/{username}/games")

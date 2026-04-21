@@ -29,6 +29,54 @@ pnpm dev:api                # http://localhost:8000
 
 `stockfish` must be on PATH for analysis features (`brew install stockfish`).
 
+## MCP server — connect your LLM
+
+Chess Coach exposes all its data as MCP tools so any client (Claude Desktop, Cursor, etc.) can query your games, analysis, patterns, and puzzles.
+
+**Prerequisites:** the API venv must exist (`scripts/run-api.sh` creates it on first run).
+
+### Claude Desktop
+
+Add a server entry to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "chess-coach": {
+      "command": "/absolute/path/to/chess-coach/scripts/run-mcp.sh"
+    }
+  }
+}
+```
+
+Replace `/absolute/path/to/chess-coach` with the real path (e.g. `$HOME/CodingProjects/chess_coach`). Restart Claude Desktop — the 7 chess-coach tools appear automatically.
+
+### Cursor
+
+Open **Settings → Features → MCP Servers → Add new MCP server** and fill in:
+
+| Field | Value |
+|-------|-------|
+| Name | `chess-coach` |
+| Type | `command` |
+| Command | `/absolute/path/to/chess-coach/scripts/run-mcp.sh` |
+
+Save and restart Cursor.
+
+### Available MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `list_games` | List your games (filterable by result, time control, opening) |
+| `get_game_pgn` | Fetch the raw PGN for a game |
+| `get_game_analysis` | Per-ply Stockfish analysis + motif tags for a game |
+| `get_mistake_history` | Your blunders/mistakes sorted by eval swing |
+| `get_top_patterns` | Aggregated motif counts — what you blunder most |
+| `next_puzzle` | Get the next drill puzzle from your personalised queue |
+| `submit_puzzle_attempt` | Record a solve or fail for a puzzle |
+
+The MCP server reads the same SQLite file as the API. Games must be synced (`POST /players/{username}/sync`) and analyzed (`POST /games/{id}/analyze`) before the tools return useful data.
+
 ## The ralph loop
 
 `scripts/ralph.sh` re-invokes Claude Code with a prompt that says: read `spec/PRD.md` and `spec/PROGRESS.md`, pick the next unchecked acceptance criterion, implement it, update PROGRESS, commit. See the script for safety rails.
