@@ -15,7 +15,58 @@ from .analyze import analyze_game
 from .chesscom import sync_player_games, sync_player_games_events
 from .db import conn_ctx, init_db
 from .engine_cache import evaluate_position, shutdown_engine
-from .jobs import active_job_for, get_job, start_job, stream as stream_job
+from .jobs import active_job, active_job_for, get_job, start_job, stream as stream_job
+
+
+def _get_settings(conn, username: str) -> dict:
+    """Per-player auto-analyze settings, with defaults if no row exists."""
+    row = conn.execute(
+        "SELECT auto_analyze, auto_depth, auto_workers FROM player_settings WHERE username = ?",
+        (username,),
+    ).fetchone()
+    if row is None:
+        return {"auto_analyze": True, "auto_depth": 18, "auto_workers": 4}
+    return {
+        "auto_analyze": bool(row["auto_analyze"]),
+        "auto_depth": int(row["auto_depth"]),
+        "auto_workers": int(row["auto_workers"]),
+    }
+
+
+def _count_unanalyzed(conn, username: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM games g"
+        " WHERE g.player_username = ?"
+        "   AND NOT EXISTS (SELECT 1 FROM analyses a WHERE a.game_id = g.id)",
+        (username,),
+    ).fetchone()[0]
+
+
+def _maybe_autostart_analyze(username: str) -> Optional[dict]:
+    """After a sync, kick off background analysis if the player has it enabled,
+    there are unanalyzed games, and no job is already running. Returns the job
+    snapshot if one was started, else None. Never raises into the caller."""
+    try:
+        with conn_ctx() as conn:
+            settings = _get_settings(conn, username)
+            if not settings["auto_analyze"]:
+                return None
+            if _count_unanalyzed(conn, username) == 0:
+                return None
+        if active_job_for(username):
+            return None
+        job = start_job(
+            username,
+            {
+                "depth": settings["auto_depth"],
+                "limit": 1000,
+                "only_unanalyzed": True,
+                "workers": settings["auto_workers"],
+            },
+        )
+        return job.snapshot
+    except Exception:
+        return None
 
 # Map our 9 internal motif tags → Lichess theme keywords (used for LIKE search)
 _MOTIF_TO_LICHESS: dict[str, list[str]] = {
@@ -86,7 +137,11 @@ def sync_player(username: str) -> dict:
         raise HTTPException(status_code=400, detail="username required")
     try:
         with conn_ctx() as conn:
-            return sync_player_games(username, conn)
+            result = sync_player_games(username, conn)
+        job = _maybe_autostart_analyze(username)
+        if job:
+            result["analyze_job"] = {"id": job["id"], "status": job["status"]}
+        return result
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=e.response.status_code,
@@ -105,9 +160,18 @@ def sync_player_stream(username: str) -> StreamingResponse:
 
     def event_source():
         try:
+            synced_ok = False
             with conn_ctx() as conn:
                 for event in sync_player_games_events(username, conn):
+                    if event.get("type") == "done":
+                        synced_ok = True
                     yield f"data: {json.dumps(event)}\n\n"
+            # After a successful sync, optionally kick off background analysis
+            # and tell the client so its job widget can attach immediately.
+            if synced_ok:
+                job = _maybe_autostart_analyze(username)
+                if job:
+                    yield f"data: {json.dumps({'type': 'analyze_started', 'job_id': job['id'], 'username': username})}\n\n"
         except httpx.HTTPStatusError as e:
             payload = {
                 "type": "error",
@@ -167,6 +231,16 @@ def start_analyze_job(username: str, body: AnalyzeJobIn) -> dict:
     return job.snapshot
 
 
+@app.get("/jobs/active")
+def get_active_job() -> dict:
+    """The most recent running job across all players (powers the global
+    floating progress widget). 404 when nothing is running."""
+    job = active_job()
+    if not job:
+        raise HTTPException(status_code=404, detail="no active job")
+    return job.snapshot
+
+
 @app.get("/jobs/{job_id}")
 def get_job_snapshot(job_id: str) -> dict:
     job = get_job(job_id)
@@ -211,6 +285,47 @@ def get_active_job_for_player(username: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="no active job")
     return job.snapshot
+
+
+class PlayerSettingsIn(BaseModel):
+    auto_analyze: Optional[bool] = None
+    auto_depth: Optional[int] = None
+    auto_workers: Optional[int] = None
+
+
+@app.get("/players/{username}/settings")
+def get_player_settings(username: str) -> dict:
+    username = username.strip().lower()
+    with conn_ctx() as conn:
+        return _get_settings(conn, username)
+
+
+@app.put("/players/{username}/settings")
+def update_player_settings(username: str, body: PlayerSettingsIn) -> dict:
+    username = username.strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="username required")
+    with conn_ctx() as conn:
+        cur = _get_settings(conn, username)
+        auto_analyze = cur["auto_analyze"] if body.auto_analyze is None else body.auto_analyze
+        auto_depth = cur["auto_depth"] if body.auto_depth is None else body.auto_depth
+        auto_workers = cur["auto_workers"] if body.auto_workers is None else body.auto_workers
+        auto_depth = max(1, min(30, int(auto_depth)))
+        auto_workers = max(1, min(16, int(auto_workers)))
+        conn.execute(
+            "INSERT INTO player_settings (username, auto_analyze, auto_depth, auto_workers)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(username) DO UPDATE SET"
+            "   auto_analyze = excluded.auto_analyze,"
+            "   auto_depth = excluded.auto_depth,"
+            "   auto_workers = excluded.auto_workers",
+            (username, 1 if auto_analyze else 0, auto_depth, auto_workers),
+        )
+        return {
+            "auto_analyze": bool(auto_analyze),
+            "auto_depth": auto_depth,
+            "auto_workers": auto_workers,
+        }
 
 
 @app.get("/players/{username}/analyze/status")
@@ -629,9 +744,83 @@ def list_player_games(
             params + [limit, offset],
         ).fetchall()
 
+        game_ids = [r["id"] for r in rows]
+        summaries = _eval_summaries(conn, username, game_ids)
+
+    games = []
+    for r in rows:
+        g = dict(r)
+        g["summary"] = summaries.get(r["id"])
+        games.append(g)
+
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "games": [dict(r) for r in rows],
+        "games": games,
     }
+
+
+def _eval_summaries(conn, username: str, game_ids: list[int]) -> dict[int, dict]:
+    """Per-game eval summary for a set of games: the analyzed player's ACPL and
+    blunder/mistake counts, plus a coarse eval sparkline (white-POV cp by ply,
+    clamped to ±1000). Returns {} for games with no analysis."""
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" for _ in game_ids)
+    # White player per game (to know which plies belong to the analyzed user).
+    white_of = {
+        r["id"]: (r["white"] or "").strip().lower()
+        for r in conn.execute(
+            f"SELECT id, white FROM games WHERE id IN ({placeholders})", game_ids
+        ).fetchall()
+    }
+    rows = conn.execute(
+        f"SELECT game_id, ply, eval_cp, classification FROM analyses"
+        f" WHERE game_id IN ({placeholders}) ORDER BY game_id, ply",
+        game_ids,
+    ).fetchall()
+
+    by_game: dict[int, list] = defaultdict(list)
+    for r in rows:
+        by_game[r["game_id"]].append(r)
+
+    out: dict[int, dict] = {}
+    for gid, plies in by_game.items():
+        player_is_white = white_of.get(gid) == username
+        prev_eval = 0  # eval before the first move (white POV)
+        loss_sum = 0
+        loss_count = 0
+        blunders = mistakes = inaccuracies = 0
+        series: list[Optional[int]] = []
+        for row in plies:
+            ev = row["eval_cp"]
+            mover_is_white = (row["ply"] % 2) == 0
+            if ev is not None:
+                series.append(max(-1000, min(1000, ev)))
+            else:
+                series.append(None)
+            # Centipawn loss + classification only for the analyzed player's moves.
+            if mover_is_white == player_is_white:
+                if row["classification"] == "blunder":
+                    blunders += 1
+                elif row["classification"] == "mistake":
+                    mistakes += 1
+                elif row["classification"] == "inaccuracy":
+                    inaccuracies += 1
+                if ev is not None and prev_eval is not None:
+                    before = prev_eval if mover_is_white else -prev_eval
+                    after = ev if mover_is_white else -ev
+                    loss_sum += max(0, before - after)
+                    loss_count += 1
+            if ev is not None:
+                prev_eval = ev
+        out[gid] = {
+            "analyzed": True,
+            "acpl": round(loss_sum / loss_count) if loss_count else 0,
+            "blunders": blunders,
+            "mistakes": mistakes,
+            "inaccuracies": inaccuracies,
+            "eval_series": series,
+        }
+    return out

@@ -9,9 +9,15 @@ DB_PATH = os.environ.get(
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL + busy_timeout so concurrent analysis workers writing the engine_lines
+    # cache don't hit "database is locked". journal_mode is a persistent property
+    # of the file; busy_timeout/synchronous are per-connection.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -95,6 +101,12 @@ def init_db() -> None:
                 FOREIGN KEY(username) REFERENCES players(username)
             );
             CREATE INDEX IF NOT EXISTS idx_attempts_user ON puzzle_attempts(username, attempted_at);
+            CREATE TABLE IF NOT EXISTS player_settings (
+                username TEXT PRIMARY KEY,
+                auto_analyze INTEGER NOT NULL DEFAULT 1,
+                auto_depth INTEGER NOT NULL DEFAULT 18,
+                auto_workers INTEGER NOT NULL DEFAULT 4
+            );
             """
         )
         # Additive migration: opening_name / opening_ply on games.

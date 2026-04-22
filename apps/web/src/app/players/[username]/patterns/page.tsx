@@ -1,5 +1,6 @@
 import Link from "next/link";
 import AnalyzeAllButton from "./AnalyzeAllButton";
+import MotifIcon from "../MotifIcon";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -180,7 +181,10 @@ export default async function PatternsPage({
                 className={`flex flex-col rounded-xl border p-5 ${motifColor(i)}`}
               >
                 <div className="mb-3 flex items-start justify-between gap-2">
-                  <h2 className="text-base font-semibold leading-tight">{label}</h2>
+                  <div className="flex items-center gap-2">
+                    <MotifIcon motif={p.motif} className="shrink-0 rounded" />
+                    <h2 className="text-base font-semibold leading-tight">{label}</h2>
+                  </div>
                   <span className="shrink-0 rounded-full bg-neutral-800 px-2.5 py-0.5 text-xs font-bold text-neutral-200">
                     {p.count} {p.count === 1 ? "game" : "games"}
                   </span>

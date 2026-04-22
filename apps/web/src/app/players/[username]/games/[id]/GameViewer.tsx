@@ -6,6 +6,7 @@ import { Chessboard } from "react-chessboard";
 import type { Arrow } from "react-chessboard/dist/chessboard/types";
 import { Chess } from "chess.js";
 import type { PlyAnalysis } from "./page";
+import EvalChart from "./EvalChart";
 
 // Structure of each motif's evidence as stored in motif_details JSON.
 interface MotifEvidence {
@@ -738,6 +739,17 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
           </button>
         </div>
 
+        {/* Eval graph across the game — click to jump to a move */}
+        {hasAnalysis && (
+          <div className="w-full max-w-[480px]">
+            <EvalChart
+              analysis={analysis}
+              cursor={cursor}
+              onSeek={(ply) => goTo(ply + 1)}
+            />
+          </div>
+        )}
+
         {/* Explore mode toggle */}
         <div className="flex flex-col items-center gap-2 w-full max-w-[480px]">
           <button
@@ -874,7 +886,12 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                       <StatRow label="Mistakes" count={playerStats.mistake} cls="text-orange-400" />
                       <StatRow label="Inaccuracies" count={playerStats.inaccuracy} cls="text-yellow-400" />
                       <div className="mt-1.5 flex items-center justify-between border-t border-neutral-800 pt-1.5">
-                        <span className="text-sm text-neutral-500">Avg. CP loss</span>
+                        <span
+                          className="cursor-help text-sm text-neutral-500 underline decoration-dotted decoration-neutral-600 underline-offset-2"
+                          title="Average centipawn loss — how much evaluation you gave up per move versus the engine's best move (100 cp = 1 pawn). Lower is better."
+                        >
+                          Avg. CP loss
+                        </span>
                         <span className="font-mono text-sm tabular-nums text-neutral-300">{playerStats.acpl}</span>
                       </div>
                     </div>
@@ -884,7 +901,12 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                       <StatRow label="Mistakes" count={oppStats.mistake} cls="text-orange-400" />
                       <StatRow label="Inaccuracies" count={oppStats.inaccuracy} cls="text-yellow-400" />
                       <div className="mt-1.5 flex items-center justify-between border-t border-neutral-800 pt-1.5">
-                        <span className="text-sm text-neutral-500">Avg. CP loss</span>
+                        <span
+                          className="cursor-help text-sm text-neutral-500 underline decoration-dotted decoration-neutral-600 underline-offset-2"
+                          title="Average centipawn loss — how much evaluation you gave up per move versus the engine's best move (100 cp = 1 pawn). Lower is better."
+                        >
+                          Avg. CP loss
+                        </span>
                         <span className="font-mono text-sm tabular-nums text-neutral-300">{oppStats.acpl}</span>
                       </div>
                     </div>
@@ -1117,8 +1139,8 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                 const whiteAnalysis = analysisMap.get(whiteIdx);
                 const blackAnalysis = analysisMap.get(blackIdx);
                 return (
-                  <>
-                    <span key={`n${i}`} className="select-none text-neutral-600">
+                  <React.Fragment key={i}>
+                    <span className="select-none text-neutral-600">
                       {i + 1}.
                     </span>
                     <button
@@ -1151,9 +1173,9 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                         <ClassificationBadge cls={blackAnalysis?.classification ?? null} />
                       </button>
                     ) : (
-                      <span key={`b${i}`} />
+                      <span />
                     )}
-                  </>
+                  </React.Fragment>
                 );
               })}
             </div>

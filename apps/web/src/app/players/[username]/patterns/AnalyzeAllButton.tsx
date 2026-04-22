@@ -23,6 +23,8 @@ interface Progress {
   label: string;
   pliesTotal: number;
   errors: number;
+  curPly?: number;
+  curGamePlies?: number;
 }
 
 interface JobSnapshot {
@@ -43,13 +45,47 @@ export default function AnalyzeAllButton({ username }: Props) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [batchSize, setBatchSize] = useState(25);
-  const [depth, setDepth] = useState(14);
+  const [depth, setDepth] = useState(18);
   const [workers, setWorkers] = useState(4);
   const [selectedClasses, setSelectedClasses] = useState<Set<TimeClass>>(
     new Set(["classical", "rapid", "blitz"])
   );
   const [error, setError] = useState<string | null>(null);
+  const [autoAnalyze, setAutoAnalyze] = useState<boolean | null>(null);
   const esRef = useRef<EventSource | null>(null);
+
+  // Load the auto-analyze preference. depth/workers selectors below default to
+  // the saved values so the manual batch matches what auto-runs use.
+  useEffect(() => {
+    fetch(`${API_URL}/players/${encodeURIComponent(username)}/settings`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (!s) return;
+        setAutoAnalyze(Boolean(s.auto_analyze));
+        if (typeof s.auto_depth === "number") setDepth(s.auto_depth);
+        if (typeof s.auto_workers === "number") setWorkers(s.auto_workers);
+      })
+      .catch(() => {});
+  }, [username]);
+
+  const saveSetting = useCallback(
+    (patch: Record<string, unknown>) => {
+      fetch(`${API_URL}/players/${encodeURIComponent(username)}/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      }).catch(() => {});
+    },
+    [username]
+  );
+
+  function toggleAutoAnalyze() {
+    setAutoAnalyze((prev) => {
+      const next = !prev;
+      saveSetting({ auto_analyze: next });
+      return next;
+    });
+  }
 
   const refreshStatus = useCallback(() => {
     fetch(`${API_URL}/players/${encodeURIComponent(username)}/analyze/status`)
@@ -92,6 +128,18 @@ export default function AnalyzeAllButton({ username }: Props) {
             refreshStatus();
             router.refresh();
           }
+        } else if (data.type === "ply_progress") {
+          setProgress((p) =>
+            p
+              ? {
+                  ...p,
+                  pliesTotal: Number(data.plies_done ?? p.pliesTotal),
+                  label: String(data.label ?? p.label),
+                  curPly: Number(data.ply ?? 0),
+                  curGamePlies: Number(data.game_plies ?? 0),
+                }
+              : p
+          );
         } else if (data.type === "start") {
           setProgress((p) => ({
             total: Number(data.games ?? p?.total ?? 0),
@@ -267,13 +315,18 @@ export default function AnalyzeAllButton({ username }: Props) {
             Depth
             <select
               value={depth}
-              onChange={(e) => setDepth(Number(e.target.value))}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setDepth(v);
+                saveSetting({ auto_depth: v });
+              }}
               disabled={running}
               className="ml-1 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200"
             >
               <option value={10}>10 (fast)</option>
               <option value={14}>14</option>
               <option value={18}>18</option>
+              <option value={20}>20</option>
               <option value={24}>24 (slow)</option>
             </select>
           </label>
@@ -281,7 +334,11 @@ export default function AnalyzeAllButton({ username }: Props) {
             Workers
             <select
               value={workers}
-              onChange={(e) => setWorkers(Number(e.target.value))}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setWorkers(v);
+                saveSetting({ auto_workers: v });
+              }}
               disabled={running}
               className="ml-1 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200"
             >
@@ -334,9 +391,15 @@ export default function AnalyzeAllButton({ username }: Props) {
             </button>
           );
         })}
-        <span className="ml-auto text-xs text-neutral-600">
-          Longer formats are analyzed first.
-        </span>
+        <label className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-neutral-400">
+          <input
+            type="checkbox"
+            checked={autoAnalyze ?? true}
+            onChange={toggleAutoAnalyze}
+            className="h-3.5 w-3.5 accent-emerald-600"
+          />
+          Auto-analyze after sync
+        </label>
       </div>
 
       {running && progress && (
@@ -349,9 +412,11 @@ export default function AnalyzeAllButton({ username }: Props) {
           </div>
           <div className="flex items-center justify-between text-xs text-neutral-500">
             <span>
-              {progress.label
-                ? `Analyzed: ${progress.label}`
-                : "Starting Stockfish…"}
+              {progress.curGamePlies
+                ? `${progress.label} — ply ${(progress.curPly ?? 0) + 1}/${progress.curGamePlies}`
+                : progress.label
+                  ? `Analyzed: ${progress.label}`
+                  : "Starting Stockfish…"}
             </span>
             <span className="tabular-nums">
               {progress.done}/{progress.total} games · {progress.pliesTotal} plies

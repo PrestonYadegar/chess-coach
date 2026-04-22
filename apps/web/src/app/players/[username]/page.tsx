@@ -1,7 +1,17 @@
 import Link from "next/link";
+import EvalSparkline from "./EvalSparkline";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const PAGE_SIZE = 20;
+
+interface GameSummary {
+  analyzed: boolean;
+  acpl: number;
+  blunders: number;
+  mistakes: number;
+  inaccuracies: number;
+  eval_series: (number | null)[];
+}
 
 interface Game {
   id: number;
@@ -12,6 +22,7 @@ interface Game {
   black: string;
   result: string;
   eco: string | null;
+  summary?: GameSummary | null;
 }
 
 interface GamesResponse {
@@ -291,6 +302,7 @@ export default async function PlayerPage({
                   <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3">Opponent</th>
                   <th className="px-4 py-3">Result</th>
+                  <th className="px-4 py-3">Eval</th>
                   <th className="px-4 py-3">Time Control</th>
                   <th className="px-4 py-3">ECO</th>
                 </tr>
@@ -298,7 +310,7 @@ export default async function PlayerPage({
               <tbody>
                 {data.games.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-4 py-8 text-center text-neutral-500">
+                    <td colSpan={6} className="px-4 py-8 text-center text-neutral-500">
                       No games found.
                     </td>
                   </tr>
@@ -308,6 +320,7 @@ export default async function PlayerPage({
                   const isWhite = game.white.toLowerCase() === lc;
                   const opponent = isWhite ? game.black : game.white;
                   const { label, className } = playerResult(game, username);
+                  const summary = game.summary;
                   return (
                     <tr
                       key={game.id}
@@ -325,6 +338,28 @@ export default async function PlayerPage({
                         </Link>
                       </td>
                       <td className={`px-4 py-3 font-semibold ${className}`}>{label}</td>
+                      <td className="px-4 py-3">
+                        {summary?.analyzed ? (
+                          <div className="flex items-center gap-3">
+                            <EvalSparkline
+                              series={summary.eval_series}
+                              playerIsWhite={isWhite}
+                            />
+                            <div className="text-xs leading-tight text-neutral-500">
+                              <div className="tabular-nums text-neutral-300">
+                                {summary.acpl} <span className="text-neutral-600">acpl</span>
+                              </div>
+                              {summary.blunders > 0 && (
+                                <div className="text-red-400/80">
+                                  {summary.blunders} blunder{summary.blunders === 1 ? "" : "s"}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-neutral-600">Not analyzed</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-neutral-400">
                         {formatTimeControl(game.time_control)}
                       </td>

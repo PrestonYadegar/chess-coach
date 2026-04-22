@@ -34,6 +34,9 @@ class Job:
             "plies_total": 0,
             "errors": 0,
             "last_label": "",
+            "current_game_id": None,
+            "current_ply": None,
+            "current_game_plies": None,
             "started_at": time.time(),
             "finished_at": None,
             "error_message": None,
@@ -44,6 +47,14 @@ class Job:
         t = event.get("type")
         if t == "start":
             snap["total"] = int(event.get("games", 0))
+        elif t == "ply_progress":
+            # Live motion between game completions. plies_total is reconciled to
+            # the authoritative count on each game_done.
+            snap["plies_total"] = int(event.get("plies_done", snap["plies_total"]))
+            snap["current_game_id"] = event.get("game_id")
+            snap["current_ply"] = event.get("ply")
+            snap["current_game_plies"] = event.get("game_plies")
+            snap["last_label"] = str(event.get("label", snap["last_label"]))
         elif t == "game_done":
             snap["analyzed"] = int(event.get("analyzed", snap["analyzed"]))
             snap["plies_total"] = int(event.get("plies_total", snap["plies_total"]))
@@ -80,6 +91,16 @@ def active_job_for(username: str) -> Optional[Job]:
             if j.username == username and j.snapshot["status"] == "running":
                 return j
     return None
+
+
+def active_job() -> Optional[Job]:
+    """The most recently started running job across all players (single-user
+    local app — at most one job runs at a time in practice)."""
+    with _jobs_lock:
+        running = [j for j in _jobs.values() if j.snapshot["status"] == "running"]
+    if not running:
+        return None
+    return max(running, key=lambda j: j.snapshot["started_at"])
 
 
 def start_job(username: str, params: dict) -> Job:
