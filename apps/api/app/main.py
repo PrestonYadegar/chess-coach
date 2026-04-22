@@ -287,12 +287,12 @@ def get_player_patterns(username: str) -> dict:
             raise HTTPException(status_code=404, detail="player not found")
 
         rows = conn.execute(
-            "SELECT a.game_id, a.fen, a.motif_tags, a.phase"
+            "SELECT a.game_id, a.ply, a.fen, a.motif_tags, a.phase, g.white, g.black"
             " FROM analyses a"
             " JOIN games g ON g.id = a.game_id"
             " WHERE g.player_username = ?"
             "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
-            " ORDER BY a.game_id DESC",
+            " ORDER BY a.game_id DESC, a.ply ASC",
             (username,),
         ).fetchall()
 
@@ -301,12 +301,22 @@ def get_player_patterns(username: str) -> dict:
     # the more interpretable "how often does this pattern come up" number.
     games_per_motif: dict[str, set[int]] = defaultdict(set)
     last_game: dict[str, int] = {}
+    last_ply: dict[str, int] = {}
     examples: dict[str, list] = defaultdict(list)
     phase_counts: dict[str, int] = defaultdict(int)
 
-    # rows are already ORDER BY a.game_id DESC, so the first time we see a tag
-    # is the most recent game where it occurred.
+    # rows are ORDER BY game_id DESC, ply ASC: the first time we see a tag is its
+    # earliest occurrence in the most recent game it appeared in.
     for r in rows:
+        # Only count motifs on the analyzed player's OWN moves. analyses holds a
+        # row per ply for both sides; ply is 0-indexed so even = White, odd =
+        # Black. Attributing the opponent's mistakes to this player inflated the
+        # counts and pointed "Last seen" at the wrong move.
+        player_is_white = (r["white"] or "").strip().lower() == username
+        mover_is_white = (r["ply"] % 2) == 0
+        if mover_is_white != player_is_white:
+            continue
+
         game_id = r["game_id"]
         fen = r["fen"]
         phase = r["phase"] or "middlegame"
@@ -324,6 +334,7 @@ def get_player_patterns(username: str) -> dict:
             games_per_motif[tag].add(game_id)
             if tag not in last_game:
                 last_game[tag] = game_id
+                last_ply[tag] = r["ply"]
             if not already_seen_in_game and len(examples[tag]) < 3:
                 examples[tag].append(fen)
 
@@ -332,6 +343,7 @@ def get_player_patterns(username: str) -> dict:
             "motif": motif,
             "count": len(games_per_motif[motif]),
             "last_seen_game_id": last_game.get(motif),
+            "last_seen_ply": last_ply.get(motif),
             "example_fens": examples[motif],
         }
         for motif in sorted(
@@ -373,7 +385,7 @@ def get_player_drill(
         if not target_motif:
             # Pick the user's most frequent mistake motif automatically
             mistake_rows = conn.execute(
-                "SELECT a.motif_tags FROM analyses a"
+                "SELECT a.motif_tags, a.ply, g.white FROM analyses a"
                 " JOIN games g ON g.id = a.game_id"
                 " WHERE g.player_username = ?"
                 "   AND a.motif_tags IS NOT NULL"
@@ -383,6 +395,10 @@ def get_player_drill(
             ).fetchall()
             counts: dict[str, int] = defaultdict(int)
             for mr in mistake_rows:
+                # Only the player's own moves (see patterns endpoint for rationale).
+                player_is_white = (mr["white"] or "").strip().lower() == username
+                if ((mr["ply"] % 2) == 0) != player_is_white:
+                    continue
                 try:
                     tags = json.loads(mr["motif_tags"])
                 except (json.JSONDecodeError, TypeError):

@@ -39,10 +39,10 @@ Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for ful
 - [x] API: motif evidence — enhance the motif tagger (or post-pass over PV+board) so each tag carries structured evidence (cited squares/pieces + exploiting UCI move/line). Persist as `analyses.motif_details` JSON, surface in `GET /games/{id}/analysis`.
 - [x] MCP: `evaluate_position(fen)` + `explore_line(fen, moves[])` tools — route through the cache; return top-N candidates + lines; `explore_line` applies moves (illegal → error) and returns resulting FEN + eval + best continuation.
 - [x] MCP: `explain_move(game_id, ply)` tool — structured fact bundle (played move SAN+UCI, eval before/after, swing, classification, phase, top-N candidate moves w/ SAN PVs from cache, motif evidence w/ cited squares + lines in SAN); tool description tells the LLM to explain from facts only.
-- [ ] Web: board overlays — draw best move as an arrow + highlight target square; selecting a motif highlights its cited squares/line. Overlays update while stepping through moves (`react-chessboard` customArrows/customSquareStyles).
-- [ ] Web: candidate moves in Move Detail — show top 3 candidates (best included) each with eval + clickable line ≥5 plies, previewed on the board; data from `POST /positions/evaluate` at multipv≥3.
-- [ ] Web: interactive motif chips — clicking a chip highlights exactly its cited squares/pieces on the board and shows its evidence; no motif may be a label with no on-board referent.
-- [ ] Web: "Explore from here" mode — toggle draggable pieces, branch a side-line off the current position (mainline untouched), live debounced eval + candidate update via `POST /positions/evaluate`, breadcrumb + "Return to game" reset, illegal moves snap back.
+- [x] Web: board overlays — draw best move as an arrow + highlight target square; selecting a motif highlights its cited squares/line. Overlays update while stepping through moves (`react-chessboard` customArrows/customSquareStyles).
+- [x] Web: candidate moves in Move Detail — show top 3 candidates (best included) each with eval + clickable line ≥5 plies, previewed on the board; data from `POST /positions/evaluate` at multipv≥3.
+- [x] Web: interactive motif chips — clicking a chip highlights exactly its cited squares/pieces on the board and shows its evidence; no motif may be a label with no on-board referent.
+- [x] Web: "Explore from here" mode — toggle draggable pieces, branch a side-line off the current position (mainline untouched), live debounced eval + candidate update via `POST /positions/evaluate`, breadcrumb + "Return to game" reset, illegal moves snap back.
 
 ---
 
@@ -73,3 +73,7 @@ Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for ful
 2026-06-14 12:00  API: motif evidence — structured evidence per tag (squares, pieces, exploiting move), analyses.motif_details JSON column, surfaced in GET /games/{id}/analysis  0b7b6fe5b21fb0dd690e87d48d79934b106b1c35
 2026-06-14 13:00  MCP: evaluate_position + explore_line tools — cache-backed, top-N candidates + SAN/UCI lines, illegal move detection  edaa3977a497fbe808b938d201c820758968b213
 2026-06-14 14:00  MCP: explain_move tool — structured fact bundle with played/best move SAN, eval swing, candidates, motif evidence  d8f116886b094b82af74122fba4995630ab4172c
+2026-06-14 15:00  Web: board overlays — best move arrow + target highlight; clickable motif chips highlight cited squares/line  57cc1f96b94d72e1de0cce6e0f5606af92f71443
+2026-06-14 16:00  Web: candidate moves in Move Detail — top 3 candidates with eval + clickable PV line, board preview on hover/select  b370d65656190c9eec86c090baddc71c536418b5
+2026-06-14 17:00  Web: interactive motif chips — filter to evidence-only chips, evidence panel on select, board overlays  7c9f009ef94576d739d1688350d9c37cb491fd3d
+2026-06-14 18:00  Web: "Explore from here" mode — draggable pieces, side-line branch, debounced eval+candidates, breadcrumb, Return to game  8184957c5e8577fb3e3701c654165eeb657f6fd5

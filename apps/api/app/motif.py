@@ -78,33 +78,50 @@ def compute_phase(board: chess.Board) -> str:
 # ── Tactical detectors ──────────────────────────────────────────────────────
 
 
-def _is_hanging(board: chess.Board, sq: chess.Square, color: chess.Color) -> bool:
-    if not board.attackers(not color, sq):
-        return False
-    return not board.attackers(color, sq)
+def _legal_capture_targets(board: chess.Board) -> set:
+    """Squares the side-to-move can *legally* capture on.
+
+    Uses legal_moves rather than raw attacker bitboards so a pinned piece — which
+    `board.attackers()` still reports as an attacker — is correctly excluded. A
+    knight pinned to its own king does not make the enemy piece it "attacks"
+    actually capturable.
+    """
+    return {m.to_square for m in board.legal_moves if board.is_capture(m)}
 
 
 def _detect_hanging_piece(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
 ) -> Optional[dict]:
-    """Player left the moved piece hanging, OR missed capturing a free opponent piece."""
+    """Player left the moved piece hanging, OR missed capturing a free opponent piece.
+
+    Both arms gate on *legal* captures (pins respected), not pseudo-legal attacker
+    bitboards, to avoid flagging a "free" capture that the only attacker is pinned
+    from making.
+    """
+    opp = not mover
+
     board_after = board_before.copy()
     board_after.push(played_move)
+    to_sq = played_move.to_square
 
-    if _is_hanging(board_after, played_move.to_square, mover):
-        p = board_after.piece_at(played_move.to_square)
+    # Moved piece left hanging: after the move it's the opponent's turn, so a
+    # legal capture of to_sq by them — with no defender of ours — means it hangs.
+    if to_sq in _legal_capture_targets(board_after) and not board_after.attackers(mover, to_sq):
+        p = board_after.piece_at(to_sq)
         return {
-            "squares": [_sq_name(played_move.to_square)],
+            "squares": [_sq_name(to_sq)],
             "piece": _PIECE_NAME.get(p.piece_type, "piece") if p else "piece",
             "reason": "moved_piece_left_hanging",
         }
 
-    opp = not mover
+    # Free capture missed: before the move it's the mover's turn, so check the
+    # captures they could *legally* make on an undefended enemy piece but didn't.
+    capturable = _legal_capture_targets(board_before)
     for sq in chess.SQUARES:
         p = board_before.piece_at(sq)
         if p is None or p.color != opp or p.piece_type == chess.KING:
             continue
-        if board_before.attackers(mover, sq) and not board_before.attackers(opp, sq):
+        if sq in capturable and not board_before.attackers(opp, sq):
             if played_move.to_square != sq:
                 return {
                     "squares": [_sq_name(sq)],
@@ -251,6 +268,14 @@ def _detect_skewer_missed(
 def _detect_back_rank(
     board_before: chess.Board, played_move: chess.Move, mover: chess.Color
 ) -> Optional[dict]:
+    """Flag only a *real* back-rank threat: the played move lets the opponent
+    deliver immediate checkmate with a rook or queen on the mover's back rank.
+
+    A loose "king on the back rank behind its pawns with an enemy rook somewhere
+    on that rank" heuristic produced false positives — an enemy rook on the back
+    rank that cannot actually mate (king has luft, rook is blocked/defended) is
+    not a back-rank motif. Requiring an actual mate-in-1 keeps this honest.
+    """
     board_after = board_before.copy()
     board_after.push(played_move)
 
@@ -262,40 +287,26 @@ def _detect_back_rank(
     if chess.square_rank(king_sq) != back_rank:
         return None
 
-    opp = not mover
-    king_file = chess.square_file(king_sq)
-
-    shield_rank = 1 if mover == chess.WHITE else 6
-    shield_squares = [
-        chess.square(f, shield_rank)
-        for f in range(max(0, king_file - 1), min(8, king_file + 2))
-    ]
-    pawn_count = sum(
-        1 for sq in shield_squares
-        if (p := board_after.piece_at(sq)) is not None
-        and p.color == mover
-        and p.piece_type == chess.PAWN
-    )
-    if pawn_count < len(shield_squares):
-        return None
-
-    threatening = []
-    for sq in chess.SQUARES:
-        p = board_after.piece_at(sq)
-        if p is None or p.color != opp:
+    # It's the opponent's turn in board_after — do they have a checkmating move
+    # that lands a rook/queen on the mover's back rank?
+    for move in board_after.legal_moves:
+        piece = board_after.piece_at(move.from_square)
+        if piece is None or piece.piece_type not in (chess.ROOK, chess.QUEEN):
             continue
-        if p.piece_type not in (chess.ROOK, chess.QUEEN):
+        if chess.square_rank(move.to_square) != back_rank:
             continue
-        if chess.square_rank(sq) == back_rank or board_after.is_attacked_by(opp, king_sq):
-            threatening.append(_sq_name(sq))
+        board_after.push(move)
+        is_mate = board_after.is_checkmate()
+        board_after.pop()
+        if is_mate:
+            return {
+                "king_square": _sq_name(king_sq),
+                "squares": [_sq_name(move.to_square)],
+                "by_move": move.uci(),
+                "reason": "back_rank_mate_threat",
+            }
 
-    if not threatening:
-        return None
-
-    return {
-        "king_square": _sq_name(king_sq),
-        "squares": threatening,
-    }
+    return None
 
 
 def _detect_pin_missed(

@@ -7,6 +7,7 @@ interface Pattern {
   motif: string;
   count: number;
   last_seen_game_id: number | null;
+  last_seen_ply: number | null;
   example_fens: string[];
 }
 
@@ -200,7 +201,9 @@ export default async function PatternsPage({
                 <div className="mt-auto flex items-center justify-between gap-2">
                   {p.last_seen_game_id && (
                     <Link
-                      href={`/players/${encodeURIComponent(username)}/games/${p.last_seen_game_id}`}
+                      href={`/players/${encodeURIComponent(username)}/games/${p.last_seen_game_id}${
+                        p.last_seen_ply != null ? `?ply=${p.last_seen_ply}` : ""
+                      }`}
                       className="text-xs text-neutral-500 hover:text-neutral-300"
                     >
                       Last seen →

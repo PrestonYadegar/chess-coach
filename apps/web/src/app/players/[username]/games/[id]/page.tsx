@@ -62,11 +62,18 @@ function resultClass(label: string): string {
 
 export default async function GameDetailPage({
   params,
+  searchParams,
 }: {
   params: { username: string; id: string };
+  searchParams?: { ply?: string };
 }) {
   const username = decodeURIComponent(params.username);
   const gameId = params.id;
+  // Deep-link target (e.g. from the patterns "Last seen" link): the ply whose
+  // move we want to land on. The board cursor for that move is ply+1 (position
+  // after the move is played), so the Move Detail panel reflects that move.
+  const plyParam = searchParams?.ply;
+  const initialPly = plyParam != null && /^\d+$/.test(plyParam) ? Number(plyParam) : null;
 
   let game: Game | null = null;
   let fetchError: string | null = null;
@@ -150,6 +157,7 @@ export default async function GameDetailPage({
           analysis={analysis}
           gameId={game.id}
           playerUsername={username}
+          initialPly={initialPly}
         />
       )}
     </main>
