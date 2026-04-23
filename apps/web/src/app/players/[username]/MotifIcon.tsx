@@ -1,249 +1,224 @@
 import React from "react";
 
-// Small mini-diagram icons for each mistake motif: a tiny board fragment with
-// Unicode piece glyphs and directional arrows illustrating the tactic.
-// viewBox is a 40×40 board of 10px cells (4×4 grid). Helpers below place
-// checker squares, piece glyphs, and arrows on that grid.
+// Simple, glanceable abstract icons for each mistake motif. Bold single-concept
+// line symbols (not busy board diagrams) so they read at card size without
+// zooming. viewBox is a plain 40×40 canvas.
 
-const C = 10; // cell size
-const LIGHT = "#b9c4a0";
-const DARK = "#6f8a5b";
+const NEU = "#e5e7eb";
+const RED = "#f87171";
+const GRN = "#34d399";
+const AMB = "#fbbf24";
 
-function cell(cx: number, cy: number, key: string) {
-  const dark = (cx + cy) % 2 === 1;
+interface Opt {
+  color?: string;
+  w?: number;
+  fill?: string;
+  head?: boolean;
+  size?: number;
+  weight?: number;
+}
+
+function ln(x1: number, y1: number, x2: number, y2: number, o: Opt = {}, key = "l") {
+  const color = o.color ?? NEU;
+  const id = color === RED ? "r" : color === GRN ? "g" : "n";
   return (
-    <rect
+    <line
       key={key}
-      x={cx * C}
-      y={cy * C}
-      width={C}
-      height={C}
-      fill={dark ? DARK : LIGHT}
+      x1={x1}
+      y1={y1}
+      x2={x2}
+      y2={y2}
+      stroke={color}
+      strokeWidth={o.w ?? 2.4}
+      strokeLinecap="round"
+      markerEnd={o.head ? `url(#mi-${id})` : undefined}
     />
   );
 }
 
-// A row/region of cells, e.g. board([[0,0],[1,0],[2,0]])
-function board(cells: [number, number][]) {
-  return cells.map(([x, y]) => cell(x, y, `c${x}-${y}`));
+function cir(cx: number, cy: number, r: number, o: Opt = {}, key = "c") {
+  return (
+    <circle
+      key={key}
+      cx={cx}
+      cy={cy}
+      r={r}
+      stroke={o.color ?? NEU}
+      strokeWidth={o.w ?? 2.4}
+      fill={o.fill ?? "none"}
+    />
+  );
 }
 
-// Piece glyph centered in cell (cx,cy). white=true → light fill + dark outline.
-function piece(cx: number, cy: number, ch: string, white = false, key = "p") {
+function pth(d: string, o: Opt = {}, key = "p") {
+  return (
+    <path
+      key={key}
+      d={d}
+      stroke={o.color ?? NEU}
+      strokeWidth={o.w ?? 2.4}
+      fill={o.fill ?? "none"}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  );
+}
+
+function sym(x: number, y: number, ch: string, o: Opt = {}, key = "s") {
   return (
     <text
       key={key}
-      x={cx * C + C / 2}
-      y={cy * C + C / 2 + 0.5}
+      x={x}
+      y={y}
       textAnchor="middle"
       dominantBaseline="central"
-      fontSize={9}
-      fill={white ? "#f8f8f8" : "#111"}
-      stroke={white ? "#111" : "none"}
-      strokeWidth={white ? 0.3 : 0}
+      fontSize={o.size ?? 16}
+      fontWeight={o.weight ?? 700}
+      fill={o.color ?? NEU}
     >
       {ch}
     </text>
   );
 }
 
-// Arrow from cell-center to cell-center (grid coords, may be fractional).
-function arrow(x1: number, y1: number, x2: number, y2: number, color: string, key = "a") {
-  return (
-    <line
-      key={key}
-      x1={x1 * C + C / 2}
-      y1={y1 * C + C / 2}
-      x2={x2 * C + C / 2}
-      y2={y2 * C + C / 2}
-      stroke={color}
-      strokeWidth={1.4}
-      markerEnd={`url(#mi-arrow-${color === RED ? "r" : color === GRN ? "g" : "n"})`}
-    />
-  );
-}
-
-const RED = "#ef4444";
-const GRN = "#34d399";
-const NEU = "#e5e7eb";
-
-// Glyphs (solid set renders crisp at tiny sizes)
-const K = "♚", Q = "♛", R = "♜", B = "♝", N = "♞", P = "♟";
-
 function content(motif: string): React.ReactNode {
   switch (motif) {
-    case "skewer_missed":
-      // bishop skewers king → queen along a diagonal-ish row
+    case "hanging_piece": // warning triangle
       return (
         <>
-          {board([[0, 1], [1, 1], [2, 1], [3, 1]])}
-          {piece(0, 1, B, true, "b")}
-          {piece(2, 1, K, false, "k")}
-          {piece(3, 1, Q, false, "q")}
-          {arrow(0.3, 1, 3, 1, NEU)}
+          {pth("M20 9 L32 30 L8 30 Z", { color: AMB }, "t")}
+          {ln(20, 16, 20, 23, { color: AMB, w: 2.6 }, "ex")}
+          {cir(20, 27, 0.4, { color: AMB, fill: AMB, w: 2 }, "dot")}
         </>
       );
-    case "fork_missed":
-      // knight forks two pieces
+    case "fork_missed": // branching arrow (one origin → two heads)
       return (
         <>
-          {board([[1, 1], [1, 2], [3, 0], [3, 2]])}
-          {piece(1, 2, N, true, "n")}
-          {piece(3, 0, K, false, "k")}
-          {piece(3, 2, R, false, "r")}
-          {arrow(1, 2, 2.7, 0.2, NEU, "a1")}
-          {arrow(1, 2, 2.7, 2, NEU, "a2")}
+          {ln(20, 32, 20, 22, {}, "stem")}
+          {ln(20, 22, 11, 11, { head: true }, "b1")}
+          {ln(20, 22, 29, 11, { head: true }, "b2")}
         </>
       );
-    case "pin_missed":
-      // bishop pins knight to king behind
+    case "skewer_missed": // straight arrow through two pieces
       return (
         <>
-          {board([[0, 1], [1, 1], [2, 1], [3, 1]])}
-          {piece(0, 1, B, true, "b")}
-          {piece(2, 1, N, false, "n")}
-          {piece(3, 1, K, false, "k")}
-          {arrow(0.3, 1, 3, 1, NEU)}
+          {ln(6, 20, 36, 20, { head: true }, "ar")}
+          {cir(13, 20, 3, { fill: "#3f4045" }, "p1")}
+          {cir(21, 20, 3, { fill: "#3f4045" }, "p2")}
         </>
       );
-    case "hanging_piece":
-      // an undefended piece attacked (red arrow), warning
+    case "pin_missed": // a pushpin / thumbtack
       return (
         <>
-          {board([[1, 1], [2, 1], [1, 2], [2, 2]])}
-          {piece(2, 1, R, true, "r")}
-          {arrow(0.5, 0.4, 1.8, 1, RED)}
-          {piece(2.6, 2.3, "!", false, "ex")}
+          <ellipse cx={20} cy={12} rx={8} ry={4} fill={NEU} />
+          {ln(13, 17, 27, 17, { w: 2.6 }, "base")}
+          {ln(20, 17, 20, 33, { w: 2.6 }, "needle")}
         </>
       );
-    case "back_rank":
-      // king on back rank behind own pawns, rook mates along rank
+    case "discovered_attack": // surprise: ? with a +
       return (
         <>
-          {board([[0, 0], [1, 0], [2, 0], [3, 0], [1, 1], [2, 1]])}
-          {piece(2, 0, K, true, "k")}
-          {piece(1, 1, P, true, "p1")}
-          {piece(2, 1, P, true, "p2")}
-          {piece(0, 0, R, false, "r")}
-          {arrow(0.3, 0, 1.8, 0, RED)}
+          {sym(18, 21, "?", { size: 24 }, "q")}
+          {sym(31, 11, "+", { size: 14, color: GRN }, "plus")}
         </>
       );
-    case "discovered_attack":
-      // a piece steps aside revealing a rook's attack
+    case "overloaded_piece": // two arrows converging on one piece
       return (
         <>
-          {board([[0, 1], [1, 1], [2, 1], [3, 1]])}
-          {piece(0, 1, R, true, "r")}
-          {piece(1, 0.2, N, true, "n")}
-          {arrow(1, 1, 1, 0.4, GRN, "mv")}
-          {piece(3, 1, Q, false, "q")}
-          {arrow(0.3, 1, 3, 1, NEU, "ln")}
+          {ln(8, 9, 17, 18, { color: RED, head: true }, "a1")}
+          {ln(32, 9, 23, 18, { color: RED, head: true }, "a2")}
+          {cir(20, 24, 3.2, { color: RED, fill: RED, w: 0 }, "dot")}
         </>
       );
-    case "overloaded_piece":
-      // one defender pulled two ways
+    case "intermezzo_missed": // in-between: scattered + × ○ (equal size)
       return (
         <>
-          {board([[1, 1], [0, 0], [2, 0], [1, 2]])}
-          {piece(1, 1, Q, true, "q")}
-          {arrow(0.3, 0.3, 0.9, 0.9, RED, "a1")}
-          {arrow(2.7, 0.3, 1.1, 0.9, RED, "a2")}
+          {sym(11, 14, "+", { size: 18, color: GRN }, "pl")}
+          {sym(30, 14, "×", { size: 18, color: RED }, "x")}
+          {cir(20, 29, 5.5, { color: NEU, w: 2.4 }, "o")}
         </>
       );
-    case "intermezzo_missed":
-      // an in-between check before recapture (zigzag-ish via two arrows)
+    case "only_move_missed": // bullseye: the single right square
       return (
         <>
-          {board([[0, 2], [1, 1], [2, 0], [2, 2]])}
-          {piece(0, 2, B, true, "b")}
-          {piece(2, 0, K, false, "k")}
-          {arrow(0.3, 1.8, 1.8, 0.3, GRN, "chk")}
-          {piece(2.6, 2.4, "+", false, "pl")}
+          {cir(20, 20, 11, {}, "o1")}
+          {cir(20, 20, 5, {}, "o2")}
+          {cir(20, 20, 1, { fill: NEU, w: 1.5 }, "o3")}
         </>
       );
-    case "only_move_missed":
-      // king in check, single escape
+    case "mating_net_missed": // you had mate (#, green)
+      return sym(20, 21, "#", { size: 26, color: GRN }, "h");
+    case "mating_net_allowed": // you walked into mate (#, red)
+      return sym(20, 21, "#", { size: 26, color: RED }, "h");
+    case "king_safety": // a broken shield (✕ through it)
       return (
         <>
-          {board([[1, 1], [2, 1], [1, 2], [2, 2]])}
-          {piece(1, 1, K, true, "k")}
-          {arrow(3, 1, 1.6, 1, RED, "atk")}
-          {arrow(1, 1, 2, 2, GRN, "esc")}
+          {pth(
+            "M20 8 L31 12 L31 20 C31 27 26 31 20 33 C14 31 9 27 9 20 L9 12 Z",
+            { w: 2.2 },
+            "shield"
+          )}
+          {ln(15, 16, 25, 26, { color: RED, w: 2.6 }, "x1")}
+          {ln(25, 16, 15, 26, { color: RED, w: 2.6 }, "x2")}
         </>
       );
-    case "mating_net_missed":
+    case "pawn_structure": // fortress battlements with brickwork
       return (
         <>
-          {board([[1, 1], [2, 1], [1, 2], [2, 2]])}
-          {piece(2, 1, K, false, "k")}
-          {arrow(0.4, 0.4, 1.6, 1, GRN, "a1")}
-          {arrow(3, 2.6, 2.4, 1.4, GRN, "a2")}
-          {piece(0.5, 2.4, "#", false, "h")}
+          {pth(
+            "M8 31 L8 18 L13 18 L13 14 L18 14 L18 18 L22 18 L22 14 L27 14 L27 18 L32 18 L32 31 Z",
+            { w: 2.2 },
+            "wall"
+          )}
+          {/* mortar courses */}
+          {ln(8, 22.5, 32, 22.5, { w: 1.2 }, "h1")}
+          {ln(8, 27, 32, 27, { w: 1.2 }, "h2")}
+          {/* staggered vertical joints (running bond) */}
+          {ln(20, 18, 20, 22.5, { w: 1.2 }, "v1")}
+          {ln(15, 22.5, 15, 27, { w: 1.2 }, "v2")}
+          {ln(25, 22.5, 25, 27, { w: 1.2 }, "v3")}
+          {ln(20, 27, 20, 31, { w: 1.2 }, "v4")}
         </>
       );
-    case "mating_net_allowed":
+    case "endgame_technique": // finish flag
       return (
         <>
-          {board([[1, 1], [2, 1], [1, 2], [2, 2]])}
-          {piece(1, 1, K, true, "k")}
-          {arrow(3, 0.4, 1.6, 1, RED, "a1")}
-          {arrow(0.4, 2.6, 1, 1.6, RED, "a2")}
-          {piece(2.6, 2.4, "#", false, "h")}
+          {ln(13, 8, 13, 32, { w: 2.4 }, "pole")}
+          {pth("M13 9 L29 13 L13 18 Z", { fill: NEU }, "flag")}
         </>
       );
-    case "king_safety":
-      // exposed king, broken pawn shield
+    case "opening_principle": // open book
       return (
         <>
-          {board([[0, 1], [1, 1], [2, 1], [1, 0]])}
-          {piece(1, 1, K, true, "k")}
-          {piece(0, 0, P, true, "p1")}
-          {piece(2, 0, P, true, "p2")}
-          {arrow(3, 0.2, 1.4, 0.9, RED, "atk")}
+          {pth("M20 13 L9 11 L9 28 L20 30 Z", {}, "left")}
+          {pth("M20 13 L31 11 L31 28 L20 30 Z", {}, "right")}
         </>
       );
-    case "pawn_structure":
-      // doubled / isolated pawns
+    case "back_rank": // boxed-in corner on the back rank, mate sliding in
       return (
         <>
-          {board([[1, 0], [1, 1], [1, 2], [3, 1]])}
-          {piece(1, 0, P, true, "p1")}
-          {piece(1, 1, P, true, "p2")}
-          {piece(3, 1, P, true, "p3")}
-        </>
-      );
-    case "endgame_technique":
-      // king + pawn endgame
-      return (
-        <>
-          {board([[1, 0], [1, 1], [1, 2], [2, 2]])}
-          {piece(1, 0, K, true, "k")}
-          {piece(1, 1, P, true, "p")}
-          {piece(2, 2, K, false, "k2")}
-        </>
-      );
-    case "opening_principle":
-      // develop a knight toward the center
-      return (
-        <>
-          {board([[1, 3], [2, 2], [1, 1], [2, 1]])}
-          {piece(1, 3, N, true, "n")}
-          {arrow(1, 3, 2, 2, GRN, "dev")}
+          {ln(7, 31, 33, 31, { w: 2.6 }, "rank")}
+          <rect
+            key="box"
+            x={26}
+            y={23}
+            width={7}
+            height={8}
+            stroke={NEU}
+            strokeWidth={2.2}
+            fill="none"
+          />
+          {ln(9, 26, 24, 26, { color: RED, head: true }, "mate")}
         </>
       );
     default:
-      return (
-        <>
-          {board([[1, 1], [2, 1], [1, 2], [2, 2]])}
-          {piece(1.5, 1.5, "?", false, "q")}
-        </>
-      );
+      return sym(20, 20, "?", { size: 18 }, "q");
   }
 }
 
 export default function MotifIcon({
   motif,
-  size = 34,
+  size = 36,
   className,
 }: {
   motif: string;
@@ -266,19 +241,19 @@ export default function MotifIcon({
         ].map(([id, color]) => (
           <marker
             key={id}
-            id={`mi-arrow-${id}`}
+            id={`mi-${id}`}
             viewBox="0 0 10 10"
-            refX={8}
+            refX={7}
             refY={5}
-            markerWidth={4}
-            markerHeight={4}
+            markerWidth={3.5}
+            markerHeight={3.5}
             orient="auto-start-reverse"
           >
             <path d="M0 0 L10 5 L0 10 z" fill={color} />
           </marker>
         ))}
       </defs>
-      <rect x={0} y={0} width={40} height={40} rx={4} fill="#3a3a3a" />
+      <rect x={0} y={0} width={40} height={40} rx={7} fill="#3f4045" />
       {content(motif)}
     </svg>
   );

@@ -44,6 +44,20 @@ Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for ful
 - [x] Web: interactive motif chips — clicking a chip highlights exactly its cited squares/pieces on the board and shows its evidence; no motif may be a label with no on-board referent.
 - [x] Web: "Explore from here" mode — toggle draggable pieces, branch a side-line off the current position (mainline untouched), live debounced eval + candidate update via `POST /positions/evaluate`, breadcrumb + "Return to game" reset, illegal moves snap back.
 
+## Interim UX work (done outside the loop, recorded for context — do NOT rebuild)
+- [x] In-place incremental Re-sync (SSE spinner, `last_synced_at` month cutoff, `?full=1` override) + games endpoint returns `opening_name` + profile shows opening name + neon "View Analysis" + "Player Analysis" title + widget auto-continues analysis to completion  e9fcb4a
+
+## Phase 7 — Unified Player Analysis page (redesign)
+Build order: backend data/stats → backend filtering → web page merge → web insight sections → widget controls. See PRD "Phase 7" for full acceptance criteria. Do not rebuild the interim UX work above (resync, opening-name, auto-continue) — Phase 7 builds on it.
+- [x] API: move count per game — add `games.num_moves` (ceil(plies/2) from PGN), drop+rebuild migration + startup backfill from stored PGN, include `num_moves` in `GET /players/{username}/games`.
+- [x] API: `GET /players/{username}/stats` — win/loss/draw from the player's POV: overall, by_color (white/black), by_time_format (Bullet/Blitz/Rapid/Classical/Daily), and best_openings top 3 per color by win% (min 3 games, tiebreak game count). Accepts the Phase 7 filter params.
+- [x] API: filters on patterns + stats — both endpoints accept optional `opening`, `color`, `time_format`; every aggregate (motif/phase counts, win/loss/draw, best openings) is restricted accordingly. `patterns` also returns the distinct available filter values (opening names, time formats, colors) present in the player's games.
+- [x] Web: merge `/players/[username]` into the single Player Analysis page — header w/ retained Re-sync, then win/loss section, filter bar, mistakes-by-phase, top-patterns/motif cards, games table; drop the "View Analysis" link and the standalone Bulk Analysis block; redirect `/players/[username]/patterns` → merged page; update drill back-link.
+- [x] Web: win/loss/tie insight section — overall W/L/D + win%, by-color, by-time-format, and best openings (top 3 as White, top 3 as Black) from `GET /players/{username}/stats`; reflects the active filter.
+- [x] Web: filter bar — opening / time-format / color controls driven by URL query params; changing a filter re-fetches patterns + stats and updates motif counts, phase chart, and win-rate section; "Clear filters" when active.
+- [x] Web: games table Moves column — show `num_moves` per game.
+- [x] Web: analysis controls in the JobStatusWidget — add minimized + expanded states; expanded exposes batch/depth/workers/time-format scope + "Auto-analyze after sync" toggle (migrated from the deleted Bulk Analysis block); launching from the widget uses those settings and auto-continues to completion.
+
 ---
 
 ## Iteration log
@@ -77,3 +91,11 @@ Build order: backend foundation → MCP tools → web. See PRD "Phase 6" for ful
 2026-06-14 16:00  Web: candidate moves in Move Detail — top 3 candidates with eval + clickable PV line, board preview on hover/select  b370d65656190c9eec86c090baddc71c536418b5
 2026-06-14 17:00  Web: interactive motif chips — filter to evidence-only chips, evidence panel on select, board overlays  7c9f009ef94576d739d1688350d9c37cb491fd3d
 2026-06-14 18:00  Web: "Explore from here" mode — draggable pieces, side-line branch, debounced eval+candidates, breadcrumb, Return to game  8184957c5e8577fb3e3701c654165eeb657f6fd5
+2026-06-15 00:00  API: games.num_moves column (ceil(plies/2) from PGN), additive migration + backfill, included in GET /players/{username}/games  8ec0d1e6455ec3af61245e319b078ad201df6791
+2026-06-15 01:00  API: GET /players/{username}/stats — overall/by_color/by_time_format W/L/D + best_openings top 3 per color, filter params  3ee980f4c8b1b37a4945e7b7e9eebe9e68d3fafe
+2026-06-15 02:00  API: filters on patterns + stats — opening/color/time_format params + available_filters in patterns response  2a536463614653aaf10024f79d24aa61ebde3fec
+2026-06-15 03:00  Web: merge /players/[username] into unified Player Analysis page — motif cards, phase chart, games table; patterns redirect; drill back-link updated  b4ef392d873656882a1fc7264c76198c2c717196
+2026-06-15 04:00  Web: win/loss/tie insight section — overall/by-color/by-time-format W/L/D + best openings per color  a59b8f7aaa3a94f035249a41370e3ea025d3069e
+2026-06-15 05:00  Web: filter bar — opening/time-format/color URL params, re-fetches patterns+stats, Clear filters  4bd46350372f38e290366457c4319a7324b51168
+2026-06-15 06:00  Web: games table Moves column — show num_moves per game (already present in merged page)  b1c586bbc869399c72fd7ffbd430d06a7f89adbb
+2026-06-15 07:00  Web: JobStatusWidget expanded state — depth/workers/batch/time-format/auto-analyze controls, persisted via settings API  03621368ebf3fee92c0e3f6a81d341d781f89ff2

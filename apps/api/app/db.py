@@ -109,12 +109,36 @@ def init_db() -> None:
             );
             """
         )
-        # Additive migration: opening_name / opening_ply on games.
+        # Additive migration: opening_name / opening_ply / num_moves on games.
         game_cols = {r[1] for r in conn.execute("PRAGMA table_info(games)").fetchall()}
         if "opening_name" not in game_cols:
             conn.execute("ALTER TABLE games ADD COLUMN opening_name TEXT")
         if "opening_ply" not in game_cols:
             conn.execute("ALTER TABLE games ADD COLUMN opening_ply INTEGER")
+        if "num_moves" not in game_cols:
+            conn.execute("ALTER TABLE games ADD COLUMN num_moves INTEGER")
+            # Backfill existing rows from stored PGN.
+            import chess.pgn, io as _io, math as _math
+            rows = conn.execute("SELECT id, pgn FROM games WHERE num_moves IS NULL").fetchall()
+            for row in rows:
+                try:
+                    game = chess.pgn.read_game(_io.StringIO(row["pgn"]))
+                    board = game.board()
+                    plies = 0
+                    for move in game.mainline_moves():
+                        board.push(move)
+                        plies += 1
+                    nm = _math.ceil(plies / 2)
+                except Exception:
+                    nm = None
+                conn.execute("UPDATE games SET num_moves = ? WHERE id = ?", (nm, row["id"]))
+
+        # Additive migration: auto_batch / auto_time_format on player_settings.
+        settings_cols = {r[1] for r in conn.execute("PRAGMA table_info(player_settings)").fetchall()}
+        if "auto_batch" not in settings_cols:
+            conn.execute("ALTER TABLE player_settings ADD COLUMN auto_batch INTEGER NOT NULL DEFAULT 50")
+        if "auto_time_format" not in settings_cols:
+            conn.execute("ALTER TABLE player_settings ADD COLUMN auto_time_format TEXT")
 
         # engine_lines: position-keyed analysis cache.
         conn.execute(

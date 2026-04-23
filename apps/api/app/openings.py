@@ -51,6 +51,37 @@ def _book() -> dict[tuple[str, ...], tuple[str, str]]:
     return book
 
 
+@lru_cache(maxsize=1)
+def _name_to_line() -> dict[str, str]:
+    """{opening name: representative SAN line}, e.g. 'Italian Game' -> '1. e4 e5 2. Nf3 Nc6 3. Bc4'.
+
+    A name can appear at several depths in the book (the named line plus its
+    sub-variations that share the name); we keep the SHORTEST move tuple so the
+    snippet shows the defining moves, not a deep sub-line.
+    """
+    shortest: dict[str, tuple[str, ...]] = {}
+    for san_tuple, (_eco, name) in _book().items():
+        cur = shortest.get(name)
+        if cur is None or len(san_tuple) < len(cur):
+            shortest[name] = san_tuple
+    out: dict[str, str] = {}
+    for name, sans in shortest.items():
+        parts: list[str] = []
+        for i, san in enumerate(sans):
+            if i % 2 == 0:
+                parts.append(f"{i // 2 + 1}.")
+            parts.append(san)
+        out[name] = " ".join(parts)
+    return out
+
+
+def line_for_name(name: str | None) -> str | None:
+    """Representative SAN move line for an opening name, or None if unknown."""
+    if not name:
+        return None
+    return _name_to_line().get(name)
+
+
 def classify_game(game: chess.pgn.Game) -> tuple[str | None, str | None, int]:
     """Walk the mainline; return (eco, name, ply_depth) of the deepest book hit.
 

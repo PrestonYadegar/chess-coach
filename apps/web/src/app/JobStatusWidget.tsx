@@ -5,6 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+const TIME_FORMATS = ["Bullet", "Blitz", "Rapid", "Classical", "Daily"];
+
 interface JobSnapshot {
   id: string;
   username: string;
@@ -19,11 +21,22 @@ interface JobSnapshot {
   current_game_plies?: number | null;
 }
 
-// A global, app-wide progress pill (bottom-right) for the background analysis
-// job. It discovers a running job via GET /jobs/active and tails its SSE
-// stream. When no job is running but the player you're viewing still has
-// unanalyzed games, it shows an idle "Analyze" pill so you can start one from
-// anywhere (e.g. after restarting the API, which clears the job registry).
+interface PlayerSettings {
+  auto_analyze: boolean;
+  auto_depth: number;
+  auto_workers: number;
+  auto_batch: number;
+  auto_time_format: string | null;
+}
+
+const DEFAULT_SETTINGS: PlayerSettings = {
+  auto_analyze: true,
+  auto_depth: 18,
+  auto_workers: 4,
+  auto_batch: 50,
+  auto_time_format: null,
+};
+
 export default function JobStatusWidget() {
   const router = useRouter();
   const pathname = usePathname();
@@ -31,13 +44,19 @@ export default function JobStatusWidget() {
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
+  const [analyzedTotal, setAnalyzedTotal] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [settings, setSettings] = useState<PlayerSettings>(DEFAULT_SETTINGS);
+  const [savingSettings, setSavingSettings] = useState(false);
   const esRef = useRef<EventSource | null>(null);
   const streamedIdRef = useRef<string | null>(null);
+  const autoContinuedRef = useRef<Set<string>>(new Set());
 
-  // Username from the current route (/players/<username>/...), used for the
-  // idle state when there's no job to attach to.
   const m = pathname?.match(/^\/players\/([^/]+)/);
   const pageUsername = m ? decodeURIComponent(m[1]) : null;
+
+  // The username that is "active" — either the running job's player, or the page's player.
+  const activeUsername = job ? job.username : pageUsername;
 
   const closeStream = useCallback(() => {
     esRef.current?.close();
@@ -103,25 +122,66 @@ export default function JobStatusWidget() {
     [closeStream]
   );
 
-  // Start/resume analysis for a player using their saved auto-analyze settings.
-  // only_unanalyzed continues from where it left off.
+  // Load settings whenever the active username changes.
+  useEffect(() => {
+    if (!activeUsername) return;
+    fetch(`${API_URL}/players/${encodeURIComponent(activeUsername)}/settings`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (s) setSettings({ ...DEFAULT_SETTINGS, ...s });
+      })
+      .catch(() => {});
+  }, [activeUsername]);
+
+  const saveSettings = useCallback(
+    async (patch: Partial<PlayerSettings>) => {
+      if (!activeUsername) return;
+      const next = { ...settings, ...patch };
+      setSettings(next);
+      setSavingSettings(true);
+      try {
+        await fetch(
+          `${API_URL}/players/${encodeURIComponent(activeUsername)}/settings`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              auto_analyze: next.auto_analyze,
+              auto_depth: next.auto_depth,
+              auto_workers: next.auto_workers,
+              auto_batch: next.auto_batch,
+              auto_time_format: next.auto_time_format ?? "",
+            }),
+          }
+        );
+      } catch {
+        // best-effort
+      } finally {
+        setSavingSettings(false);
+      }
+    },
+    [activeUsername, settings]
+  );
+
   const startAnalysis = useCallback(
-    async (username: string) => {
+    async (username: string, overrideSettings?: PlayerSettings) => {
       const u = encodeURIComponent(username);
       setBusy(true);
       try {
-        const s = await fetch(`${API_URL}/players/${u}/settings`)
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null);
+        const s = overrideSettings ?? settings;
+        const body: Record<string, unknown> = {
+          depth: s.auto_depth,
+          workers: s.auto_workers,
+          limit: s.auto_batch,
+          only_unanalyzed: true,
+        };
+        if (s.auto_time_format) {
+          body.time_classes = [s.auto_time_format];
+        }
         const res = await fetch(`${API_URL}/players/${u}/analyze`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            depth: s?.auto_depth ?? 18,
-            workers: s?.auto_workers ?? 4,
-            limit: 1000,
-            only_unanalyzed: true,
-          }),
+          body: JSON.stringify(body),
         });
         if (res.ok) {
           const snap: JobSnapshot = await res.json();
@@ -133,39 +193,51 @@ export default function JobStatusWidget() {
         setBusy(false);
       }
     },
-    [attachStream]
+    [attachStream, settings]
   );
 
   const stop = useCallback(async () => {
     if (!job) return;
-    // Cancellation only takes effect at the next ply/game boundary, so show a
-    // "Stopping…" state until the stream reports a terminal status.
     setStopping(true);
     try {
       await fetch(`${API_URL}/jobs/${job.id}/stop`, { method: "POST" });
     } catch {
-      // stream will reflect the cancelled state when it lands
+      // stream will reflect cancellation
     }
   }, [job]);
 
-  // Clear the stopping state once the job is no longer running.
   useEffect(() => {
     if (job && job.status !== "running") setStopping(false);
   }, [job]);
 
-  // Poll for an active job. Cheap (one GET) and resilient to API restarts.
+  // Auto-continue: keep running until all in-scope games are analyzed.
   useEffect(() => {
-    let cancelledHook = false;
+    if (
+      job &&
+      job.status === "done" &&
+      job.analyzed > 0 &&
+      remaining != null &&
+      remaining > 0 &&
+      !busy &&
+      !autoContinuedRef.current.has(job.id)
+    ) {
+      autoContinuedRef.current.add(job.id);
+      startAnalysis(job.username);
+    }
+  }, [job, remaining, busy, startAnalysis]);
+
+  // Poll for an active job.
+  useEffect(() => {
+    let cancelled = false;
     const poll = () => {
       fetch(`${API_URL}/jobs/active`)
         .then((r) => (r.ok ? r.json() : null))
         .then((snap: JobSnapshot | null) => {
-          if (cancelledHook) return;
+          if (cancelled) return;
           if (snap && snap.status === "running") {
             setJob(snap);
             attachStream(snap);
           } else if (!streamedIdRef.current) {
-            // No active job and we aren't tailing a finishing one.
             setJob((p) => (p && p.status === "running" ? null : p));
           }
         })
@@ -174,116 +246,217 @@ export default function JobStatusWidget() {
     poll();
     const t = setInterval(poll, 5000);
     return () => {
-      cancelledHook = true;
+      cancelled = true;
       clearInterval(t);
     };
   }, [attachStream]);
 
   useEffect(() => () => closeStream(), [closeStream]);
 
-  // Refresh the unanalyzed count for whichever player is relevant (a finished
-  // job's player, or the player whose page you're on) so the action button can
-  // show how much is left — and so the idle pill knows whether to appear.
+  // Refresh unanalyzed count.
   useEffect(() => {
     const u = job && job.status !== "running" ? job.username : !job ? pageUsername : null;
     if (!u) {
       setRemaining(null);
       return;
     }
-    let cancelledHook = false;
+    let cancelled = false;
     const fetchStatus = () =>
       fetch(`${API_URL}/players/${encodeURIComponent(u)}/analyze/status`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (!cancelledHook && d) setRemaining(Math.max(0, d.games - d.analyzed));
+          if (!cancelled && d) {
+            setRemaining(Math.max(0, d.games - d.analyzed));
+            setAnalyzedTotal(d.analyzed);
+          }
         })
         .catch(() => {});
     fetchStatus();
-    // Poll while idle so the count tracks any analysis happening elsewhere.
     const t = setInterval(fetchStatus, 8000);
     return () => {
-      cancelledHook = true;
+      cancelled = true;
       clearInterval(t);
     };
   }, [job, pageUsername]);
 
-  // ---- Idle state: no job, but the player you're viewing has work to do ----
-  if (!job) {
-    if (!pageUsername || remaining == null || remaining === 0) return null;
-    const patternsHref = `/players/${encodeURIComponent(pageUsername)}/patterns`;
-    if (pathname === patternsHref) return null; // patterns page has its own button
-    return (
-      <div className="fixed bottom-4 right-4 z-50 w-72 rounded-xl border border-neutral-700 bg-neutral-900/95 p-3 shadow-2xl backdrop-blur">
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-2 text-xs font-semibold text-neutral-200">
-            <span className="inline-block h-2 w-2 rounded-full bg-neutral-400" />
-            {remaining} game{remaining === 1 ? "" : "s"} not analyzed
-          </span>
-        </div>
-        <div className="mt-2.5 flex items-center gap-2">
-          <button
-            onClick={() => startAnalysis(pageUsername)}
-            disabled={busy}
-            className="rounded-md bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-          >
-            {busy ? "Starting…" : `Analyze (${remaining})`}
-          </button>
-          <button
-            onClick={() => router.push(patternsHref)}
-            className="ml-auto text-[11px] text-neutral-500 hover:text-neutral-300"
-          >
-            Patterns →
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const username = job ? job.username : pageUsername;
 
-  // ---- Job state: running or finished ----
-  const patternsHref = `/players/${encodeURIComponent(job.username)}/patterns`;
-  const onPatternsPage = pathname === patternsHref;
-  // Don't double up with the inline panel on the patterns page itself.
-  if (onPatternsPage && job.status === "running") return null;
+  // Nothing to show.
+  if (!job && (!pageUsername || remaining == null || remaining === 0)) return null;
 
+  // On the (now-redirected) patterns page, still suppress double widget.
+  const patternsHref = username ? `/players/${encodeURIComponent(username)}/patterns` : null;
+  if (patternsHref && pathname === patternsHref && job?.status === "running") return null;
+
+  // ---- Derived display values ----
+  const running = job ? job.status === "running" : false;
   const pct =
-    job.total > 0 ? Math.min(100, Math.round((job.analyzed / job.total) * 100)) : 0;
-  const running = job.status === "running";
+    job && job.total > 0 ? Math.min(100, Math.round((job.analyzed / job.total) * 100)) : 0;
 
-  const statusText = running
+  const statusText = !job
+    ? `${remaining} game${remaining === 1 ? "" : "s"} not analyzed`
+    : running
     ? `Analyzing ${job.username}`
     : job.status === "done"
-      ? "Analysis complete"
-      : job.status === "cancelled"
-        ? "Analysis stopped"
-        : "Analysis error";
+    ? "Analysis complete"
+    : job.status === "cancelled"
+    ? "Analysis stopped"
+    : "Analysis error";
 
   const plyText =
-    running && job.current_game_plies
+    job && running && job.current_game_plies
       ? `Analyzing ply ${(job.current_ply ?? 0) + 1}/${job.current_game_plies}`
       : null;
 
+  // ---- Controls panel (expanded state) ----
+  const ControlsPanel = () => (
+    <div className="mt-3 space-y-2 border-t border-neutral-700 pt-3">
+      {/* Depth */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[10px] text-neutral-400 w-16 shrink-0">Depth</label>
+        <div className="flex items-center gap-1">
+          {[10, 14, 18, 22].map((d) => (
+            <button
+              key={d}
+              onClick={() => saveSettings({ auto_depth: d })}
+              className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                settings.auto_depth === d
+                  ? "bg-emerald-600 text-white"
+                  : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {d}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Workers */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[10px] text-neutral-400 w-16 shrink-0">Workers</label>
+        <div className="flex items-center gap-1">
+          {[1, 2, 4, 8].map((w) => (
+            <button
+              key={w}
+              onClick={() => saveSettings({ auto_workers: w })}
+              className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                settings.auto_workers === w
+                  ? "bg-emerald-600 text-white"
+                  : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Batch size */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[10px] text-neutral-400 w-16 shrink-0">Batch</label>
+        <div className="flex items-center gap-1">
+          {[10, 25, 50, 100].map((b) => (
+            <button
+              key={b}
+              onClick={() => saveSettings({ auto_batch: b })}
+              className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                settings.auto_batch === b
+                  ? "bg-emerald-600 text-white"
+                  : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {b}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Time format scope */}
+      <div className="flex items-center gap-2">
+        <label className="text-[10px] text-neutral-400 w-16 shrink-0">Format</label>
+        <div className="flex flex-wrap items-center gap-1">
+          <button
+            onClick={() => saveSettings({ auto_time_format: null })}
+            className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+              !settings.auto_time_format
+                ? "bg-emerald-600 text-white"
+                : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+            }`}
+          >
+            All
+          </button>
+          {TIME_FORMATS.map((tf) => (
+            <button
+              key={tf}
+              onClick={() =>
+                saveSettings({
+                  auto_time_format: settings.auto_time_format === tf ? null : tf,
+                })
+              }
+              className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                settings.auto_time_format === tf
+                  ? "bg-emerald-600 text-white"
+                  : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Auto-analyze after sync */}
+      <div className="flex items-center justify-between gap-2 pt-0.5">
+        <label className="text-[10px] text-neutral-400">Auto-analyze after sync</label>
+        <button
+          onClick={() => saveSettings({ auto_analyze: !settings.auto_analyze })}
+          className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+            settings.auto_analyze ? "bg-emerald-600" : "bg-neutral-700"
+          }`}
+        >
+          <span
+            className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+              settings.auto_analyze ? "translate-x-3.5" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+      {savingSettings && (
+        <p className="text-[9px] text-neutral-500 text-right">Saving…</p>
+      )}
+    </div>
+  );
+
   return (
     <div className="fixed bottom-4 right-4 z-50 w-72 rounded-xl border border-neutral-700 bg-neutral-900/95 p-3 shadow-2xl backdrop-blur">
+      {/* Header row */}
       <div className="flex items-center gap-2">
         <span className="flex items-center gap-2 text-xs font-semibold text-neutral-200">
           {running ? (
             <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
-          ) : (
+          ) : job ? (
             <span
               className={
                 "inline-block h-2 w-2 rounded-full " +
                 (job.status === "done"
                   ? "bg-emerald-400"
                   : job.status === "error"
-                    ? "bg-red-400"
-                    : "bg-neutral-400")
+                  ? "bg-red-400"
+                  : "bg-neutral-400")
               }
             />
+          ) : (
+            <span className="inline-block h-2 w-2 rounded-full bg-neutral-400" />
           )}
           {statusText}
         </span>
+        {/* Expand/collapse toggle */}
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="ml-auto text-[10px] text-neutral-500 hover:text-neutral-300"
+          title={expanded ? "Collapse" : "Settings"}
+        >
+          {expanded ? "▲" : "⚙"}
+        </button>
       </div>
 
+      {/* Progress bar (running only) */}
       {running && (
         <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
           <div
@@ -293,18 +466,33 @@ export default function JobStatusWidget() {
         </div>
       )}
 
-      <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-500">
-        <span className="truncate">
-          {running
-            ? plyText ?? (job.last_label ? `${job.last_label}` : "Starting…")
-            : `${job.plies_total} plies analyzed`}
-        </span>
-        <span className="tabular-nums">
-          {job.analyzed}/{job.total}
-          {job.errors > 0 ? ` · ${job.errors} err` : ""}
-        </span>
-      </div>
+      {/* Status line */}
+      {job && (
+        <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-500">
+          {running ? (
+            <>
+              <span className="truncate">
+                {plyText ?? (job.last_label ? `${job.last_label}` : "Starting…")}
+              </span>
+              <span className="tabular-nums">
+                {job.analyzed}/{job.total}
+                {job.errors > 0 ? ` · ${job.errors} err` : ""}
+              </span>
+            </>
+          ) : (
+            // Terminal state: show the player's overall analyzed-game count, not
+            // this batch's ply/job fraction.
+            <span className="tabular-nums">
+              {analyzedTotal != null
+                ? `${analyzedTotal} game${analyzedTotal === 1 ? "" : "s"} analyzed`
+                : ""}
+              {job.errors > 0 ? ` · ${job.errors} err` : ""}
+            </span>
+          )}
+        </div>
+      )}
 
+      {/* Action buttons */}
       <div className="mt-2.5 flex items-center gap-2">
         {running ? (
           <button
@@ -319,25 +507,32 @@ export default function JobStatusWidget() {
           </button>
         ) : (
           <button
-            onClick={() => startAnalysis(job.username)}
-            disabled={busy || remaining === 0}
+            onClick={() => username && startAnalysis(username)}
+            disabled={busy || remaining === 0 || !username}
             className="rounded-md bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
           >
             {busy
               ? "Starting…"
               : remaining === 0
-                ? "All analyzed"
-                : (job.status === "cancelled" ? "Resume" : "Analyze more") +
-                  (remaining != null ? ` (${remaining})` : "")}
+              ? "All analyzed"
+              : !job
+              ? `Analyze (${remaining})`
+              : (job.status === "cancelled" ? "Resume" : "Analyze more") +
+                (remaining != null ? ` (${remaining})` : "")}
           </button>
         )}
-        <button
-          onClick={() => router.push(patternsHref)}
-          className="ml-auto text-[11px] text-neutral-500 hover:text-neutral-300"
-        >
-          {running ? "Manage →" : "View patterns →"}
-        </button>
+        {username && (
+          <button
+            onClick={() => router.push(`/players/${encodeURIComponent(username)}`)}
+            className="ml-auto text-[11px] text-neutral-500 hover:text-neutral-300"
+          >
+            {running ? "Manage →" : "View Analysis →"}
+          </button>
+        )}
       </div>
+
+      {/* Expanded controls */}
+      {expanded && <ControlsPanel />}
     </div>
   );
 }

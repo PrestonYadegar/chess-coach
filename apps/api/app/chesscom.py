@@ -41,6 +41,15 @@ def _chesscom_id_from_url(url: str | None) -> str | None:
     return url.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _count_plies(game) -> int:
+    count = 0
+    node = game
+    while node.variations:
+        node = node.variations[0]
+        count += 1
+    return count
+
+
 def iter_games_from_pgn(pgn_text: str) -> Iterator[dict]:
     stream = io.StringIO(pgn_text)
     while True:
@@ -52,6 +61,8 @@ def iter_games_from_pgn(pgn_text: str) -> Iterator[dict]:
         chesscom_id = _chesscom_id_from_url(url) or _build_synthetic_id(headers)
         played_at = _parse_played_at(headers)
         eco_book, opening_name, opening_ply = classify_game(game)
+        import math
+        plies = _count_plies(game)
         yield {
             "chesscom_id": chesscom_id,
             "played_at": played_at,
@@ -64,6 +75,7 @@ def iter_games_from_pgn(pgn_text: str) -> Iterator[dict]:
             "eco": headers.get("ECO") or eco_book,
             "opening_name": opening_name,
             "opening_ply": opening_ply or None,
+            "num_moves": math.ceil(plies / 2) if plies else None,
             "pgn": str(game),
         }
 
@@ -103,8 +115,8 @@ def _ingest_one_archive(conn, username: str, url: str) -> tuple[int, int]:
             """
             INSERT OR IGNORE INTO games
                 (player_username, chesscom_id, played_at, time_control,
-                 white, black, result, eco, opening_name, opening_ply, pgn)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 white, black, result, eco, opening_name, opening_ply, num_moves, pgn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 username,
@@ -117,6 +129,7 @@ def _ingest_one_archive(conn, username: str, url: str) -> tuple[int, int]:
                 g["eco"],
                 g["opening_name"],
                 g["opening_ply"],
+                g.get("num_moves"),
                 g["pgn"],
             ),
         )
@@ -133,13 +146,39 @@ def _archive_label(url: str) -> str:
     return url
 
 
-def sync_player_games(username: str, conn, sleep_seconds: float = ARCHIVE_SLEEP_SECONDS) -> dict:
+def _get_last_synced_at(conn, username: str) -> str | None:
+    row = conn.execute(
+        "SELECT last_synced_at FROM players WHERE username = ?", (username,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _incremental_archives(archives: list[str], last_synced_at: str | None) -> list[str]:
+    """Drop monthly archives that predate the month we last synced.
+
+    chess.com archives are one-per-month (`.../games/YYYY/MM`). Anything before
+    the last-synced month is already fully ingested, so we only re-fetch the
+    last-synced month onward — new games land via INSERT OR IGNORE. When we've
+    never synced (last_synced_at is None) we keep everything."""
+    if not last_synced_at:
+        return archives
+    # last_synced_at is ISO ("2024-03-17T..."); the month label is "2024-03".
+    cutoff = last_synced_at[:7]
+    return [u for u in archives if _archive_label(u) >= cutoff]
+
+
+def sync_player_games(
+    username: str, conn, sleep_seconds: float = ARCHIVE_SLEEP_SECONDS, full: bool = False
+) -> dict:
     """Blocking sync — kept for the existing POST endpoint and for tests."""
+    last_synced_at = _get_last_synced_at(conn, username)
     conn.execute(
         "INSERT OR IGNORE INTO players (username, last_synced_at) VALUES (?, NULL)",
         (username,),
     )
     archives = list_archives(username)
+    if not full:
+        archives = _incremental_archives(archives, last_synced_at)
     total_seen = 0
     inserted = 0
     for i, url in enumerate(archives):
@@ -162,10 +201,13 @@ def sync_player_games(username: str, conn, sleep_seconds: float = ARCHIVE_SLEEP_
     }
 
 
-def sync_player_games_events(username: str, conn, sleep_seconds: float = ARCHIVE_SLEEP_SECONDS):
+def sync_player_games_events(
+    username: str, conn, sleep_seconds: float = ARCHIVE_SLEEP_SECONDS, full: bool = False
+):
     """Generator version: yields a dict per progress event so an SSE
     endpoint can stream them to the client. Commits after each archive
     so the partial state is visible if the client disconnects."""
+    last_synced_at = _get_last_synced_at(conn, username)
     conn.execute(
         "INSERT OR IGNORE INTO players (username, last_synced_at) VALUES (?, NULL)",
         (username,),
@@ -176,6 +218,8 @@ def sync_player_games_events(username: str, conn, sleep_seconds: float = ARCHIVE
     except Exception as e:
         yield {"type": "error", "message": f"failed to list archives: {e}"}
         return
+    if not full:
+        archives = _incremental_archives(archives, last_synced_at)
 
     yield {"type": "start", "username": username, "archives": len(archives)}
 

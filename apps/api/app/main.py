@@ -16,20 +16,24 @@ from .chesscom import sync_player_games, sync_player_games_events
 from .db import conn_ctx, init_db
 from .engine_cache import evaluate_position, shutdown_engine
 from .jobs import active_job, active_job_for, get_job, start_job, stream as stream_job
+from .openings import line_for_name
 
 
 def _get_settings(conn, username: str) -> dict:
     """Per-player auto-analyze settings, with defaults if no row exists."""
     row = conn.execute(
-        "SELECT auto_analyze, auto_depth, auto_workers FROM player_settings WHERE username = ?",
+        "SELECT auto_analyze, auto_depth, auto_workers, auto_batch, auto_time_format"
+        " FROM player_settings WHERE username = ?",
         (username,),
     ).fetchone()
     if row is None:
-        return {"auto_analyze": True, "auto_depth": 18, "auto_workers": 4}
+        return {"auto_analyze": True, "auto_depth": 18, "auto_workers": 4, "auto_batch": 50, "auto_time_format": None}
     return {
         "auto_analyze": bool(row["auto_analyze"]),
         "auto_depth": int(row["auto_depth"]),
         "auto_workers": int(row["auto_workers"]),
+        "auto_batch": int(row["auto_batch"]) if row["auto_batch"] is not None else 50,
+        "auto_time_format": row["auto_time_format"],
     }
 
 
@@ -55,15 +59,15 @@ def _maybe_autostart_analyze(username: str) -> Optional[dict]:
                 return None
         if active_job_for(username):
             return None
-        job = start_job(
-            username,
-            {
-                "depth": settings["auto_depth"],
-                "limit": 1000,
-                "only_unanalyzed": True,
-                "workers": settings["auto_workers"],
-            },
-        )
+        job_params: dict = {
+            "depth": settings["auto_depth"],
+            "limit": settings["auto_batch"],
+            "only_unanalyzed": True,
+            "workers": settings["auto_workers"],
+        }
+        if settings.get("auto_time_format"):
+            job_params["time_classes"] = [settings["auto_time_format"]]
+        job = start_job(username, job_params)
         return job.snapshot
     except Exception:
         return None
@@ -152,8 +156,11 @@ def sync_player(username: str) -> dict:
 
 
 @app.get("/players/{username}/sync/stream")
-def sync_player_stream(username: str) -> StreamingResponse:
-    """Server-Sent Events: one event per archive ingested."""
+def sync_player_stream(username: str, full: bool = False) -> StreamingResponse:
+    """Server-Sent Events: one event per archive ingested.
+
+    By default this is incremental — only months at/after the last sync are
+    re-fetched. Pass `?full=1` to re-ingest every archive."""
     username = username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="username required")
@@ -162,7 +169,7 @@ def sync_player_stream(username: str) -> StreamingResponse:
         try:
             synced_ok = False
             with conn_ctx() as conn:
-                for event in sync_player_games_events(username, conn):
+                for event in sync_player_games_events(username, conn, full=full):
                     if event.get("type") == "done":
                         synced_ok = True
                     yield f"data: {json.dumps(event)}\n\n"
@@ -291,6 +298,8 @@ class PlayerSettingsIn(BaseModel):
     auto_analyze: Optional[bool] = None
     auto_depth: Optional[int] = None
     auto_workers: Optional[int] = None
+    auto_batch: Optional[int] = None
+    auto_time_format: Optional[str] = None
 
 
 @app.get("/players/{username}/settings")
@@ -310,21 +319,31 @@ def update_player_settings(username: str, body: PlayerSettingsIn) -> dict:
         auto_analyze = cur["auto_analyze"] if body.auto_analyze is None else body.auto_analyze
         auto_depth = cur["auto_depth"] if body.auto_depth is None else body.auto_depth
         auto_workers = cur["auto_workers"] if body.auto_workers is None else body.auto_workers
+        auto_batch = cur["auto_batch"] if body.auto_batch is None else body.auto_batch
+        auto_time_format = cur["auto_time_format"] if body.auto_time_format is None else body.auto_time_format
+        # sentinel "" means "clear"
+        if auto_time_format == "":
+            auto_time_format = None
         auto_depth = max(1, min(30, int(auto_depth)))
         auto_workers = max(1, min(16, int(auto_workers)))
+        auto_batch = max(1, min(1000, int(auto_batch)))
         conn.execute(
-            "INSERT INTO player_settings (username, auto_analyze, auto_depth, auto_workers)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO player_settings (username, auto_analyze, auto_depth, auto_workers, auto_batch, auto_time_format)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(username) DO UPDATE SET"
             "   auto_analyze = excluded.auto_analyze,"
             "   auto_depth = excluded.auto_depth,"
-            "   auto_workers = excluded.auto_workers",
-            (username, 1 if auto_analyze else 0, auto_depth, auto_workers),
+            "   auto_workers = excluded.auto_workers,"
+            "   auto_batch = excluded.auto_batch,"
+            "   auto_time_format = excluded.auto_time_format",
+            (username, 1 if auto_analyze else 0, auto_depth, auto_workers, auto_batch, auto_time_format),
         )
         return {
             "auto_analyze": bool(auto_analyze),
             "auto_depth": auto_depth,
             "auto_workers": auto_workers,
+            "auto_batch": auto_batch,
+            "auto_time_format": auto_time_format,
         }
 
 
@@ -392,7 +411,12 @@ def get_game(game_id: int) -> dict:
 
 
 @app.get("/players/{username}/patterns")
-def get_player_patterns(username: str) -> dict:
+def get_player_patterns(
+    username: str,
+    opening: Optional[str] = Query(default=None),
+    color: Optional[str] = Query(default=None),
+    time_format: Optional[str] = Query(default=None),
+) -> dict:
     username = username.strip().lower()
     with conn_ctx() as conn:
         row = conn.execute(
@@ -401,14 +425,73 @@ def get_player_patterns(username: str) -> dict:
         if not row:
             raise HTTPException(status_code=404, detail="player not found")
 
-        rows = conn.execute(
-            "SELECT a.game_id, a.ply, a.fen, a.motif_tags, a.phase, g.white, g.black"
-            " FROM analyses a"
-            " JOIN games g ON g.id = a.game_id"
-            " WHERE g.player_username = ?"
-            "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
-            " ORDER BY a.game_id DESC, a.ply ASC",
+        # Fetch all games for filter-value discovery
+        all_games = conn.execute(
+            "SELECT id, white, black, time_control, eco, opening_name FROM games WHERE player_username = ?",
             (username,),
+        ).fetchall()
+
+        # Compute available filter values from all games (unfiltered)
+        opening_counts: dict[str, int] = defaultdict(int)
+        avail_time_formats: set[str] = set()
+        avail_colors: set[str] = set()
+        valid_game_ids: set[int] = set()
+        for g in all_games:
+            is_white = (g["white"] or "").strip().lower() == username
+            player_color = "white" if is_white else "black"
+            tf = _classify_time_format(g["time_control"])
+            op_name = g["opening_name"] or g["eco"] or ""
+            eco = g["eco"] or ""
+            avail_time_formats.add(tf)
+            avail_colors.add(player_color)
+            # Opening dropdown counts/ordering reflect the OTHER active filters
+            # (color + time format) but not the opening filter itself, so the list
+            # narrows to what's relevant under the current selection.
+            if op_name:
+                if (not color or player_color == color.lower()) and (
+                    not time_format or tf == time_format
+                ):
+                    opening_counts[op_name] += 1
+            # Games feeding the motif/phase aggregates respect all three filters.
+            if color and player_color != color.lower():
+                continue
+            if time_format and tf != time_format:
+                continue
+            if opening and op_name and op_name != opening and eco != opening:
+                continue
+            valid_game_ids.add(g["id"])
+
+        # Openings sorted by how often the player has played them (desc), with a
+        # representative move line for hover snippets in the UI.
+        avail_openings = [
+            {"name": name, "games": cnt, "moves": line_for_name(name)}
+            for name, cnt in sorted(
+                opening_counts.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+        ]
+        available_filters = {
+            "openings": avail_openings,
+            "time_formats": sorted(avail_time_formats),
+            "colors": sorted(avail_colors),
+        }
+
+        if not valid_game_ids:
+            return {
+                "username": username,
+                "patterns": [],
+                "phase_counts": {},
+                "available_filters": available_filters,
+            }
+
+        placeholders = ",".join("?" * len(valid_game_ids))
+        rows = conn.execute(
+            f"SELECT a.game_id, a.ply, a.fen, a.motif_tags, a.phase, g.white, g.black"
+            f" FROM analyses a"
+            f" JOIN games g ON g.id = a.game_id"
+            f" WHERE g.id IN ({placeholders})"
+            f"   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
+            f" ORDER BY a.game_id DESC, a.ply ASC",
+            list(valid_game_ids),
         ).fetchall()
 
     # Per-game dedup: each motif counted at most once per game. Density signal
@@ -470,6 +553,7 @@ def get_player_patterns(username: str) -> dict:
         "username": username,
         "patterns": patterns,
         "phase_counts": dict(phase_counts),
+        "available_filters": available_filters,
     }
 
 
@@ -716,6 +800,9 @@ def list_player_games(
     offset: int = Query(default=0, ge=0),
     result: Optional[str] = Query(default=None),
     time_control: Optional[str] = Query(default=None),
+    opening: Optional[str] = Query(default=None),
+    color: Optional[str] = Query(default=None),
+    time_format: Optional[str] = Query(default=None),
 ) -> dict:
     username = username.strip().lower()
     with conn_ctx() as conn:
@@ -733,22 +820,35 @@ def list_player_games(
         if time_control:
             conditions.append("time_control = ?")
             params.append(time_control)
+        if opening:
+            conditions.append("(opening_name = ? OR eco = ?)")
+            params.extend([opening, opening])
+        if color == "white":
+            conditions.append("LOWER(white) = ?")
+            params.append(username)
+        elif color == "black":
+            conditions.append("LOWER(black) = ?")
+            params.append(username)
 
         where = " AND ".join(conditions)
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM games WHERE {where}", params
-        ).fetchone()[0]
         rows = conn.execute(
-            f"SELECT id, chesscom_id, played_at, time_control, white, black, result, eco"
-            f" FROM games WHERE {where} ORDER BY played_at DESC LIMIT ? OFFSET ?",
-            params + [limit, offset],
+            f"SELECT id, chesscom_id, played_at, time_control, white, black, result, eco, opening_name, num_moves"
+            f" FROM games WHERE {where} ORDER BY played_at DESC",
+            params,
         ).fetchall()
 
-        game_ids = [r["id"] for r in rows]
+        # time_format is derived from the raw time_control string, so it can't be
+        # expressed in SQL — filter in Python, then paginate the filtered set.
+        if time_format:
+            rows = [r for r in rows if _classify_time_format(r["time_control"]) == time_format]
+
+        total = len(rows)
+        page_rows = rows[offset : offset + limit]
+        game_ids = [r["id"] for r in page_rows]
         summaries = _eval_summaries(conn, username, game_ids)
 
     games = []
-    for r in rows:
+    for r in page_rows:
         g = dict(r)
         g["summary"] = summaries.get(r["id"])
         games.append(g)
@@ -758,6 +858,148 @@ def list_player_games(
         "limit": limit,
         "offset": offset,
         "games": games,
+    }
+
+
+def _classify_time_format(tc: Optional[str]) -> str:
+    """Classify a Chess.com time_control string into Bullet/Blitz/Rapid/Classical/Daily."""
+    if not tc:
+        return "Unknown"
+    if "/" in tc:
+        return "Daily"
+    parts = tc.split("+")
+    try:
+        base_secs = int(parts[0])
+    except ValueError:
+        return "Unknown"
+    inc = int(parts[1]) if len(parts) > 1 else 0
+    # Estimated total seconds for ~40 moves (FIDE formula approximation)
+    total = base_secs + 40 * inc
+    if total < 179:
+        return "Bullet"
+    if total < 599:
+        return "Blitz"
+    if total < 1799:
+        return "Rapid"
+    return "Classical"
+
+
+def _wld(result: str, is_white: bool) -> str:
+    if result == "1/2-1/2":
+        return "draws"
+    if (result == "1-0" and is_white) or (result == "0-1" and not is_white):
+        return "wins"
+    return "losses"
+
+
+def _win_pct(wins: int, total: int) -> float:
+    return round(wins / total * 100, 1) if total else 0.0
+
+
+def _stats_shape(wins: int, losses: int, draws: int) -> dict:
+    total = wins + losses + draws
+    return {"wins": wins, "losses": losses, "draws": draws, "total": total, "win_pct": _win_pct(wins, total)}
+
+
+@app.get("/players/{username}/stats")
+def get_player_stats(
+    username: str,
+    opening: Optional[str] = Query(default=None),
+    color: Optional[str] = Query(default=None),
+    time_format: Optional[str] = Query(default=None),
+) -> dict:
+    username = username.strip().lower()
+    with conn_ctx() as conn:
+        row = conn.execute(
+            "SELECT username FROM players WHERE username = ?", (username,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="player not found")
+
+        rows = conn.execute(
+            "SELECT id, white, black, result, time_control, eco, opening_name FROM games WHERE player_username = ?",
+            (username,),
+        ).fetchall()
+
+    overall = {"wins": 0, "losses": 0, "draws": 0}
+    by_color: dict[str, dict] = {"white": {"wins": 0, "losses": 0, "draws": 0}, "black": {"wins": 0, "losses": 0, "draws": 0}}
+    by_time_format: dict[str, dict] = {}
+    # opening stats: color -> opening_key -> {wins, losses, draws, opening_name, eco}
+    opening_stats: dict[str, dict] = {"white": {}, "black": {}}
+
+    for r in rows:
+        is_white = (r["white"] or "").strip().lower() == username
+        player_color = "white" if is_white else "black"
+        tf = _classify_time_format(r["time_control"])
+        op_name = r["opening_name"] or r["eco"] or ""
+        eco = r["eco"] or ""
+
+        # Opening + time-format filters mask every aggregate. The COLOR filter is
+        # deliberately NOT applied to the color-centric cards (Overall, By Color,
+        # Best Openings) — those always show the full White-vs-Black picture so the
+        # comparison stays meaningful. Color only narrows By Format (and the
+        # patterns/phase/motif sections handled by the patterns endpoint).
+        if time_format and tf != time_format:
+            continue
+        if opening and op_name and op_name != opening and eco != opening:
+            continue
+
+        outcome = _wld(r["result"], is_white)
+
+        def inc(d: dict) -> None:
+            d[outcome] = d.get(outcome, 0) + 1
+
+        inc(overall)
+        inc(by_color[player_color])
+
+        if op_name:
+            key = op_name
+            if key not in opening_stats[player_color]:
+                opening_stats[player_color][key] = {"wins": 0, "losses": 0, "draws": 0, "opening_name": op_name, "eco": eco}
+            inc(opening_stats[player_color][key])
+
+        # By Format respects the color filter.
+        if color and player_color != color.lower():
+            continue
+        if tf not in by_time_format:
+            by_time_format[tf] = {"wins": 0, "losses": 0, "draws": 0}
+        inc(by_time_format[tf])
+
+    def top_openings(color_key: str) -> list:
+        entries = []
+        for op_data in opening_stats[color_key].values():
+            total = op_data["wins"] + op_data["losses"] + op_data["draws"]
+            if total < 3:
+                continue
+            wp = _win_pct(op_data["wins"], total)
+            entries.append({
+                "opening_name": op_data["opening_name"],
+                "eco": op_data["eco"],
+                "moves": line_for_name(op_data["opening_name"]),
+                "games": total,
+                "wins": op_data["wins"],
+                "losses": op_data["losses"],
+                "draws": op_data["draws"],
+                "win_pct": wp,
+            })
+        entries.sort(key=lambda x: (-x["win_pct"], -x["games"]))
+        return entries[:3]
+
+    return {
+        "username": username,
+        "overall": _stats_shape(overall.get("wins", 0), overall.get("losses", 0), overall.get("draws", 0)),
+        "by_color": {
+            "white": _stats_shape(by_color["white"].get("wins", 0), by_color["white"].get("losses", 0), by_color["white"].get("draws", 0)),
+            "black": _stats_shape(by_color["black"].get("wins", 0), by_color["black"].get("losses", 0), by_color["black"].get("draws", 0)),
+        },
+        "by_time_format": {
+            tf: _stats_shape(v.get("wins", 0), v.get("losses", 0), v.get("draws", 0))
+            for tf, v in by_time_format.items()
+        },
+        "best_openings": {
+            "white": top_openings("white"),
+            "black": top_openings("black"),
+        },
     }
 
 
