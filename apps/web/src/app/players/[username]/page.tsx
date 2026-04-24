@@ -4,8 +4,10 @@ import ResyncButton from "./ResyncButton";
 import MotifIcon from "./MotifIcon";
 import FilterBar from "./FilterBar";
 import TimeFormatIcon from "./TimeFormatIcon";
+import BestGames from "./BestGames";
+import { API_URL } from "@/lib/api";
+import { MOTIF_LABELS } from "@/lib/motifs";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const PAGE_SIZE = 20;
 
 interface GameSummary {
@@ -91,24 +93,6 @@ interface StatsResponse {
   by_time_format: Record<string, WinRecord>;
   best_openings: { white: BestOpening[]; black: BestOpening[] };
 }
-
-const MOTIF_LABELS: Record<string, string> = {
-  hanging_piece: "Hanging Piece",
-  fork_missed: "Fork Missed",
-  skewer_missed: "Skewer Missed",
-  back_rank: "Back Rank",
-  pin_missed: "Pin Missed",
-  discovered_attack: "Discovered Attack",
-  overloaded_piece: "Overloaded Piece",
-  intermezzo_missed: "Intermezzo Missed",
-  only_move_missed: "Only Move Missed",
-  mating_net_missed: "Mating Net Missed",
-  mating_net_allowed: "Mating Net Allowed",
-  king_safety: "King Safety",
-  pawn_structure: "Pawn Structure",
-  endgame_technique: "Endgame Technique",
-  opening_principle: "Opening Principle",
-};
 
 const MOTIF_DESC: Record<string, string> = {
   hanging_piece: "Left a piece undefended or missed capturing a free piece.",
@@ -532,6 +516,13 @@ export default async function PlayerPage({
         </div>
       )}
 
+      {/* Best Games */}
+      {allPatterns.length > 0 && (
+        <div className="mb-10">
+          <BestGames username={username} />
+        </div>
+      )}
+
       {/* Games table */}
       {data && (
         <>
@@ -545,7 +536,12 @@ export default async function PlayerPage({
                   <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3">Opponent</th>
                   <th className="px-4 py-3">Result</th>
-                  <th className="px-4 py-3">Eval</th>
+                  <th
+                    className="px-4 py-3"
+                    title="Average Centipawn Loss — the average difference in evaluation between the player's move and the engine's best move. Lower is stronger."
+                  >
+                    Eval
+                  </th>
                   <th className="px-4 py-3">Moves</th>
                   <th className="px-4 py-3">Time Control</th>
                   <th className="px-4 py-3">Opening</th>
@@ -593,11 +589,6 @@ export default async function PlayerPage({
                               <div className="tabular-nums text-neutral-300">
                                 {summary.acpl} <span className="text-neutral-600">acpl</span>
                               </div>
-                              {summary.blunders > 0 && (
-                                <div className="text-red-400/80">
-                                  {summary.blunders} blunder{summary.blunders === 1 ? "" : "s"}
-                                </div>
-                              )}
                             </div>
                           </div>
                         ) : (

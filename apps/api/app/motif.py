@@ -580,13 +580,6 @@ def _detect_pawn_structure(
     after_count = _pawn_weakness_count(board_after, mover)
     if after_count <= before_count:
         return None
-    # Collect newly weakened pawn squares
-    weak_after = [
-        sq for sq in board_after.pieces(chess.PAWN, mover)
-        if _pawn_weakness_count(
-            board_after, mover
-        ) > before_count
-    ]
     return {
         "weaknesses_before": before_count,
         "weaknesses_after": after_count,

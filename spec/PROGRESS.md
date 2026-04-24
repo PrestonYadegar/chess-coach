@@ -1,6 +1,6 @@
 # Progress
 
-The ralph loop reads this file plus `PRD.md`, picks the FIRST unchecked item below, implements it, ticks the box, commits, and exits. Order matters — do not skip.
+The build loop reads this file plus `PRD.md`, picks the FIRST unchecked item below, implements it, ticks the box, commits, and exits. Order matters — do not skip.
 
 ## Phase 1 — Ingest
 - [x] API: `POST /players/{username}/sync` — fetch Chess.com monthly archives, parse PGN, upsert into `games`. Port logic from `tools/download_games.sh`. Idempotent.
@@ -61,7 +61,7 @@ Build order: backend data/stats → backend filtering → web page merge → web
 ---
 
 ## Iteration log
-(The ralph loop appends one line per iteration: `YYYY-MM-DD HH:MM  <task>  <commit-sha>`)
+(The build loop appends one line per iteration: `YYYY-MM-DD HH:MM  <task>  <commit-sha>`)
 2026-06-13 06:58  POST /players/{username}/sync endpoint with sqlite schema + chess.com PGN ingest  2d934b5467f029f4d16d948e2bf36ef678b0857a
 2026-06-13 07:15  GET /players/{username}/games paginated list with result and time_control filters  c5b943846188715faa3522392e5152a4562648c9
 2026-06-13 07:25  GET /games/{id} single game with PGN  a4721fd76953a3460fd90f828ef094f4a66b3059

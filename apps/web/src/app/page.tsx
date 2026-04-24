@@ -3,8 +3,7 @@
 import { useState, FormEvent, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { API_URL } from "@/lib/api";
 
 type Progress = {
   archive: string;
@@ -105,7 +104,12 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-2xl px-6 py-24">
-      <h1 className="text-4xl font-bold tracking-tight">chess-coach</h1>
+      <div className="flex items-baseline justify-between">
+        <h1 className="text-4xl font-bold tracking-tight">chess-coach</h1>
+        <Link href="/settings" className="text-sm text-neutral-500 hover:text-neutral-300">
+          Settings
+        </Link>
+      </div>
       <p className="mt-4 text-neutral-400">
         Pull your games. Find your mistakes. Drill them. Free forever.
       </p>

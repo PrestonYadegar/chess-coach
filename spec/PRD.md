@@ -45,7 +45,7 @@ These are **done and working** — do not rebuild or refactor them; they are des
 
 ## Phases & acceptance criteria (remaining work)
 
-The ralph loop takes the FIRST unchecked item in `spec/PROGRESS.md`, in order. Acceptance criteria for each come from the matching section below.
+The build loop takes the FIRST unchecked item in `spec/PROGRESS.md`, in order. Acceptance criteria for each come from the matching section below.
 
 ### Phase 4 — Puzzles (remaining)
 - [ ] Web: `/players/[username]/drill` — board + solve interaction + streak counter, driven by `GET /players/{username}/drill` and recording results via `POST /puzzle_attempts`.
@@ -59,7 +59,7 @@ The ralph loop takes the FIRST unchecked item in `spec/PROGRESS.md`, in order. A
 
 **Concept.** LLMs reason poorly about raw board positions but explain *well* when handed verified facts. So Stockfish + the motif tagger produce the ground-truth facts about a move (eval, best line, what was missed); the user's own LLM — connected over MCP — turns those facts into coaching prose. The web UI adds a sandbox where the user can play out alternative lines and watch the eval move, then ask their LLM (through MCP) why a line works or fails. **The LLM never decides what is good or bad — it only explains facts the engine already verified.**
 
-This phase has three layers, built in this order (each layer's items are independent ralph iterations): backend foundation → MCP tools → web UI.
+This phase has three layers, built in this order (each layer's items are independent build-loop iterations): backend foundation → MCP tools → web UI.
 
 Already present in the web UI (hand-built, do not rebuild): the eval score is rendered inside the eval bar, and a "Move Detail" panel on the game detail page shows the played move, classification, engine best move, phase, and motif tags for the current position. Phase 6 web work *extends* these, it does not replace them.
 
@@ -96,7 +96,7 @@ Already present in the web UI (hand-built, do not rebuild): the eval score is re
 
 **Goal.** Collapse the profile and the patterns page into **one** Player Analysis page at `/players/[username]`, move all analysis *controls* into the JobStatusWidget, and add filtering + win-rate insight. The standalone Bulk Analysis control block goes away (the widget owns those controls). Keep everything informational: top patterns, mistakes by phase, the games table, and the motif cards all remain.
 
-This phase's items are independent ralph iterations, in build order: backend data/stats → backend filtering → web page merge → web insight sections → widget controls.
+This phase's items are independent build-loop iterations, in build order: backend data/stats → backend filtering → web page merge → web insight sections → widget controls.
 
 **Backend**
 - **Move count per game.** Surface the number of full moves for each game. Add a `games.num_moves` column (count plies in the PGN at sync time, `ceil(plies/2)`; drop+rebuild migration on missing column, same one-shot pattern as `phase`/`pv`; backfill existing rows from stored PGN on startup migration). Include `num_moves` in `GET /players/{username}/games`.

@@ -4,9 +4,7 @@ import io
 import json
 import os
 import queue as _queue
-import shutil
 import sqlite3
-import threading
 from multiprocessing import get_context
 from typing import Callable, Iterable, Optional
 
@@ -14,15 +12,25 @@ import chess
 import chess.engine
 import chess.pgn
 
+from .constants import (
+    BLUNDER_CP,
+    DEFAULT_DEPTH,
+    INACCURACY_CP,
+    JOB_DEFAULT_DEPTH,
+    MISTAKE_CP,
+)
 from .db import get_conn
-from .engine_cache import _read_cache, _upsert_lines
+from .engine_cache import (
+    STOCKFISH_NOT_FOUND_MSG,
+    STOCKFISH_PATH,
+    _read_cache,
+    _upsert_lines,
+    open_configured_engine,
+)
 from .motif import compute_phase, encode_tags, tag_motifs_with_details
+from .services import time_class as _time_class
 
 _PV_MAX_PLIES = 8
-
-
-STOCKFISH_PATH = shutil.which("stockfish")
-DEFAULT_DEPTH = 18
 
 # Time-class buckets, ordered longest → shortest. Used for prioritizing which
 # games to analyze first when a player has thousands of games.
@@ -30,50 +38,17 @@ TIME_CLASSES = ("classical", "rapid", "blitz", "bullet", "daily", "unknown")
 _CLASS_PRIORITY = {tc: i for i, tc in enumerate(TIME_CLASSES)}
 
 
-def _time_class(tc: Optional[str]) -> str:
-    """Map a chess.com `time_control` string ("60", "180+1", "1/259200") to a class."""
-    if not tc:
-        return "unknown"
-    if "/" in tc:
-        return "daily"
-    base_str = tc.split("+", 1)[0]
-    try:
-        base = int(base_str)
-    except ValueError:
-        return "unknown"
-    if base < 180:
-        return "bullet"
-    if base < 600:
-        return "blitz"
-    if base < 1800:
-        return "rapid"
-    return "classical"
-
-
 def _classify(eval_before_cp: Optional[int], eval_after_cp: Optional[int]) -> str:
     if eval_before_cp is None or eval_after_cp is None:
         return "good"
     swing = eval_before_cp - eval_after_cp
-    if swing >= 200:
+    if swing >= BLUNDER_CP:
         return "blunder"
-    if swing >= 100:
+    if swing >= MISTAKE_CP:
         return "mistake"
-    if swing >= 50:
+    if swing >= INACCURACY_CP:
         return "inaccuracy"
     return "good"
-
-
-def _make_engine() -> chess.engine.SimpleEngine:
-    if STOCKFISH_PATH is None:
-        raise RuntimeError(
-            "stockfish not found on PATH. Install it: brew install stockfish"
-        )
-    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    try:
-        engine.configure({"Threads": 1, "Hash": 128})
-    except chess.engine.EngineError:
-        pass
-    return engine
 
 
 def _row_to_info(r: sqlite3.Row) -> dict:
@@ -111,6 +86,7 @@ def _analyse_cached(
     infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
     if conn is not None:
         _upsert_lines(conn, fen, infos, depth)
+        conn.commit()
     return infos
 
 
@@ -251,7 +227,7 @@ def analyze_game(game_id: int, conn: sqlite3.Connection, depth: int = DEFAULT_DE
     if not row:
         raise ValueError(f"game {game_id} not found")
 
-    with _make_engine() as engine:
+    with open_configured_engine() as engine:
         rows = _analyze_pgn_rows(game_id, row["pgn"], engine, depth, conn=conn)
 
     plies = _write_rows(conn, game_id, rows)
@@ -268,11 +244,7 @@ _WORKER_ENGINE: Optional[chess.engine.SimpleEngine] = None
 
 def _worker_init(stockfish_path: str) -> None:
     global _WORKER_ENGINE
-    _WORKER_ENGINE = chess.engine.SimpleEngine.popen_uci(stockfish_path)
-    try:
-        _WORKER_ENGINE.configure({"Threads": 1, "Hash": 128})
-    except chess.engine.EngineError:
-        pass
+    _WORKER_ENGINE = open_configured_engine(stockfish_path)
 
 
 def _worker_analyze(game_id: int, pgn_text: str, depth: int, progress_q=None):
@@ -304,7 +276,7 @@ def _select_games(
     username: str,
     only_unanalyzed: bool,
     time_classes: Optional[Iterable[str]],
-    limit: int,
+    limit: Optional[int],
 ) -> list[sqlite3.Row]:
     """Return games to analyze, ordered longest-time-control first then most-recent."""
     if only_unanalyzed:
@@ -333,17 +305,19 @@ def _select_games(
     decorated.sort(key=lambda t: t[1], reverse=True)
     decorated.sort(key=lambda t: t[0])
 
-    return [d[2] for d in decorated[:limit]]
+    return [d[2] for d in (decorated if limit is None else decorated[:limit])]
 
 
 def analyze_player_games_events(
     username: str,
     conn: sqlite3.Connection,
-    depth: int = 14,
-    limit: int = 50,
+    depth: int = JOB_DEFAULT_DEPTH,
+    limit: Optional[int] = None,
     only_unanalyzed: bool = True,
     workers: int = 1,
     time_classes: Optional[Iterable[str]] = None,
+    priority_fn: Optional[Callable[[], set[int]]] = None,
+    notify_done: Optional[Callable[[int], None]] = None,
 ):
     """Generator yielding SSE-shaped progress events while analyzing a batch.
 
@@ -354,7 +328,7 @@ def analyze_player_games_events(
     if STOCKFISH_PATH is None:
         yield {
             "type": "error",
-            "message": "stockfish not found on PATH. Install it: brew install stockfish",
+            "message": STOCKFISH_NOT_FOUND_MSG,
         }
         return
 
@@ -412,27 +386,49 @@ def analyze_player_games_events(
 
     if workers <= 1:
         # Single-process path: cache-enabled, per-game progress (no per-ply, since
-        # a callback can't yield from this synchronous loop). The default batch
-        # uses workers > 1, which streams per-ply below.
-        with _make_engine() as engine:
-            for i, r in enumerate(rows):
+        # a callback can't yield from this synchronous loop). Re-sorts for priority
+        # before each game pick so high-priority games jump to the front.
+        remaining = list(rows)
+        i_map = {r["id"]: idx for idx, r in enumerate(rows)}
+        with open_configured_engine() as engine:
+            while remaining:
+                if priority_fn:
+                    pri = priority_fn()
+                    if pri:
+                        remaining.sort(key=lambda r: (0 if r["id"] in pri else 1))
+                r = remaining.pop(0)
                 gid = r["id"]
                 try:
                     analysis_rows = _analyze_pgn_rows(gid, r["pgn"], engine, depth, conn=conn)
                     plies = _write_rows(conn, gid, analysis_rows)
                     conn.commit()
-                    yield _emit_done(gid, plies, i)
+                    if notify_done:
+                        notify_done(gid)
+                    yield _emit_done(gid, plies, i_map[gid])
                 except Exception as e:
                     yield {
                         "type": "game_error",
-                        "index": i,
+                        "index": i_map[gid],
                         "games_total": total,
                         "game_id": gid,
                         "message": str(e),
                     }
     else:
+        remaining = list(rows)
+        i_map = {r["id"]: idx for idx, r in enumerate(rows)}
+
+        def _pop_next() -> Optional[sqlite3.Row]:
+            if not remaining:
+                return None
+            if priority_fn:
+                pri = priority_fn()
+                if pri:
+                    for idx, r in enumerate(remaining):
+                        if r["id"] in pri:
+                            return remaining.pop(idx)
+            return remaining.pop(0)
+
         ctx = get_context("spawn")
-        # Cap workers at min(requested, cores, games).
         max_w = max(1, min(workers, (os.cpu_count() or 2), total))
         manager = ctx.Manager()
         progress_q = manager.Queue()
@@ -442,10 +438,7 @@ def analyze_player_games_events(
             initializer=_worker_init,
             initargs=(STOCKFISH_PATH,),
         )
-        futures = {
-            pool.submit(_worker_analyze, r["id"], r["pgn"], depth, progress_q): (i, r["id"])
-            for i, r in enumerate(rows)
-        }
+        in_flight: dict[cf.Future, int] = {}  # fut → game_id
 
         def _drain_progress():
             """Yield a ply_progress event for every queued ply update (non-blocking)."""
@@ -460,50 +453,62 @@ def analyze_player_games_events(
                 plies_done += 1
                 yield _ply_event(gid, ply, game_plies)
 
+        # Fill the pool initially
+        while remaining and len(in_flight) < max_w:
+            r = _pop_next()
+            if r is None:
+                break
+            fut = pool.submit(_worker_analyze, r["id"], r["pgn"], depth, progress_q)
+            in_flight[fut] = r["id"]
+
         try:
-            pending = set(futures)
-            while pending:
+            while in_flight:
                 yield from _drain_progress()
-                done, pending = cf.wait(
-                    pending, timeout=0.25, return_when=cf.FIRST_COMPLETED
+                done, _ = cf.wait(
+                    set(in_flight), timeout=0.25, return_when=cf.FIRST_COMPLETED
                 )
                 for fut in done:
-                    i, gid = futures[fut]
+                    gid = in_flight.pop(fut)
                     try:
                         status, ret_gid, payload = fut.result()
                     except Exception as e:
                         yield {
                             "type": "game_error",
-                            "index": i,
+                            "index": i_map[gid],
                             "games_total": total,
                             "game_id": gid,
                             "message": str(e),
                         }
-                        continue
-                    if status == "ok":
-                        plies = _write_rows(conn, ret_gid, payload)
-                        conn.commit()
-                        yield _emit_done(ret_gid, plies, i)
                     else:
-                        yield {
-                            "type": "game_error",
-                            "index": i,
-                            "games_total": total,
-                            "game_id": ret_gid,
-                            "message": str(payload),
-                        }
-            # Final drain for plies enqueued after the last wait() returned.
+                        if status == "ok":
+                            plies = _write_rows(conn, ret_gid, payload)
+                            conn.commit()
+                            if notify_done:
+                                notify_done(ret_gid)
+                            yield _emit_done(ret_gid, plies, i_map[ret_gid])
+                        else:
+                            yield {
+                                "type": "game_error",
+                                "index": i_map[gid],
+                                "games_total": total,
+                                "game_id": ret_gid,
+                                "message": str(payload),
+                            }
+                    # Refill one slot
+                    if remaining:
+                        next_r = _pop_next()
+                        if next_r is not None:
+                            next_fut = pool.submit(
+                                _worker_analyze, next_r["id"], next_r["pgn"], depth, progress_q
+                            )
+                            in_flight[next_fut] = next_r["id"]
             yield from _drain_progress()
         finally:
             try:
                 manager.shutdown()
             except Exception:
                 pass
-            # On client disconnect (GeneratorExit) or normal completion, drop any
-            # queued work AND terminate the worker processes so Stockfish doesn't
-            # keep burning CPU. Default shutdown(wait=True) would block for every
-            # running future to finish — useless if the user clicked Stop.
-            for f in futures:
+            for f in list(in_flight):
                 f.cancel()
             for p in list(pool._processes.values()):
                 try:

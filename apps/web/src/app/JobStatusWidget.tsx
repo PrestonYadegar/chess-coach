@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { API_URL } from "@/lib/api";
 
 const TIME_FORMATS = ["Bullet", "Blitz", "Rapid", "Classical", "Daily"];
 
@@ -31,9 +30,9 @@ interface PlayerSettings {
 
 const DEFAULT_SETTINGS: PlayerSettings = {
   auto_analyze: true,
-  auto_depth: 18,
+  auto_depth: 14,
   auto_workers: 4,
-  auto_batch: 50,
+  auto_batch: 0,
   auto_time_format: null,
 };
 
@@ -45,7 +44,9 @@ export default function JobStatusWidget() {
   const [stopping, setStopping] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [analyzedTotal, setAnalyzedTotal] = useState<number | null>(null);
+  const [totalGames, setTotalGames] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [minimized, setMinimized] = useState(false);
   const [settings, setSettings] = useState<PlayerSettings>(DEFAULT_SETTINGS);
   const [savingSettings, setSavingSettings] = useState(false);
   const esRef = useRef<EventSource | null>(null);
@@ -104,6 +105,8 @@ export default function JobStatusWidget() {
                 }
               : p
           );
+          setAnalyzedTotal((prev) => (prev !== null ? prev + 1 : prev));
+          setRemaining((prev) => (prev !== null ? Math.max(0, prev - 1) : prev));
         } else if (data.type === "game_error") {
           setJob((p) => (p ? { ...p, errors: p.errors + 1 } : p));
         } else if (
@@ -172,7 +175,7 @@ export default function JobStatusWidget() {
         const body: Record<string, unknown> = {
           depth: s.auto_depth,
           workers: s.auto_workers,
-          limit: s.auto_batch,
+          limit: s.auto_batch === 0 ? null : s.auto_batch,
           only_unanalyzed: true,
         };
         if (s.auto_time_format) {
@@ -226,9 +229,17 @@ export default function JobStatusWidget() {
     }
   }, [job, remaining, busy, startAnalysis]);
 
-  // Poll for an active job.
+  // Refs so interval callbacks can read current state without being dependencies.
+  const remainingRef = useRef(remaining);
+  remainingRef.current = remaining;
+  const jobRef = useRef(job);
+  jobRef.current = job;
+
+  // Poll for an active job. Uses recursive setTimeout so the cadence can vary:
+  // fast (5s) while something is running or games remain, slow (30s) when idle.
   useEffect(() => {
     let cancelled = false;
+    let t: ReturnType<typeof setTimeout>;
     const poll = () => {
       fetch(`${API_URL}/jobs/active`)
         .then((r) => (r.ok ? r.json() : null))
@@ -241,60 +252,105 @@ export default function JobStatusWidget() {
             setJob((p) => (p && p.status === "running" ? null : p));
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (cancelled) return;
+          const idle = remainingRef.current === 0 && !jobRef.current;
+          t = setTimeout(poll, idle ? 30_000 : 5_000);
+        });
     };
     poll();
-    const t = setInterval(poll, 5000);
     return () => {
       cancelled = true;
-      clearInterval(t);
+      clearTimeout(t);
     };
   }, [attachStream]);
 
   useEffect(() => () => closeStream(), [closeStream]);
 
-  // Refresh unanalyzed count.
+  // Refresh analyzed/total game counts. Skips the fetch when idle (remaining=0,
+  // no job) since counts only change after a sync or new analysis. Uses refs so
+  // the interval stays stable without re-running on every SSE event.
+  const statusUsername = job?.username ?? pageUsername;
   useEffect(() => {
-    const u = job && job.status !== "running" ? job.username : !job ? pageUsername : null;
-    if (!u) {
+    if (!statusUsername) {
       setRemaining(null);
       return;
     }
     let cancelled = false;
-    const fetchStatus = () =>
-      fetch(`${API_URL}/players/${encodeURIComponent(u)}/analyze/status`)
+    const fetchStatus = () => {
+      // Nothing will have changed while idle — skip to avoid spurious requests.
+      if (remainingRef.current === 0 && !jobRef.current) return;
+      fetch(`${API_URL}/players/${encodeURIComponent(statusUsername)}/analyze/status`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
           if (!cancelled && d) {
             setRemaining(Math.max(0, d.games - d.analyzed));
             setAnalyzedTotal(d.analyzed);
+            setTotalGames(d.games);
           }
         })
         .catch(() => {});
+    };
     fetchStatus();
     const t = setInterval(fetchStatus, 8000);
     return () => {
       cancelled = true;
       clearInterval(t);
     };
-  }, [job, pageUsername]);
+  }, [statusUsername]);
 
   const username = job ? job.username : pageUsername;
 
-  // Nothing to show.
-  if (!job && (!pageUsername || remaining == null || remaining === 0)) return null;
+  // Auto-minimize to a circle when analysis finishes with nothing left to do.
+  useEffect(() => {
+    if (!job && remaining === 0 && (analyzedTotal ?? 0) > 0) {
+      setMinimized(true);
+    }
+  }, [job, remaining, analyzedTotal]);
+
+  // Expand out of minimized state whenever a new job starts.
+  useEffect(() => {
+    if (job?.status === "running") setMinimized(false);
+  }, [job?.status]);
+
+  // Hide when not on a player page with no active job — avoids stale state
+  // from a previous player page visit bleeding through on home/settings pages.
+  if (!pageUsername && !job) return null;
+
+  // Nothing to show at all — no data yet.
+  if (!job && (remaining == null) && (analyzedTotal ?? 0) === 0) return null;
 
   // On the (now-redirected) patterns page, still suppress double widget.
   const patternsHref = username ? `/players/${encodeURIComponent(username)}/patterns` : null;
   if (patternsHref && pathname === patternsHref && job?.status === "running") return null;
 
+  // Minimized: floating circle that reopens the full widget on click.
+  if (minimized) {
+    return (
+      <button
+        onClick={() => setMinimized(false)}
+        title={`${analyzedTotal ?? 0} games analyzed — click to view`}
+        className="fixed bottom-4 right-4 z-50 flex h-9 w-9 items-center justify-center rounded-full border border-neutral-700 bg-neutral-900/95 shadow-2xl backdrop-blur transition-colors hover:border-emerald-600"
+      >
+        <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+      </button>
+    );
+  }
+
   // ---- Derived display values ----
   const running = job ? job.status === "running" : false;
   const pct =
-    job && job.total > 0 ? Math.min(100, Math.round((job.analyzed / job.total) * 100)) : 0;
+    analyzedTotal != null && totalGames != null && totalGames > 0
+      ? Math.min(100, Math.round((analyzedTotal / totalGames) * 100))
+      : job && job.total > 0
+      ? Math.min(100, Math.round((job.analyzed / job.total) * 100))
+      : 0;
 
   const statusText = !job
-    ? `${remaining} game${remaining === 1 ? "" : "s"} not analyzed`
+    ? remaining === 0
+      ? `All ${totalGames ?? analyzedTotal ?? ""} games analyzed`
+      : `${remaining} game${remaining === 1 ? "" : "s"} not analyzed`
     : running
     ? `Analyzing ${job.username}`
     : job.status === "done"
@@ -353,7 +409,7 @@ export default function JobStatusWidget() {
       <div className="flex items-center justify-between gap-2">
         <label className="text-[10px] text-neutral-400 w-16 shrink-0">Batch</label>
         <div className="flex items-center gap-1">
-          {[10, 25, 50, 100].map((b) => (
+          {[25, 50, 100, 0].map((b) => (
             <button
               key={b}
               onClick={() => saveSettings({ auto_batch: b })}
@@ -363,7 +419,7 @@ export default function JobStatusWidget() {
                   : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
               }`}
             >
-              {b}
+              {b === 0 ? "All" : b}
             </button>
           ))}
         </div>
@@ -445,15 +501,35 @@ export default function JobStatusWidget() {
             <span className="inline-block h-2 w-2 rounded-full bg-neutral-400" />
           )}
           {statusText}
+          {running && (
+            <span
+              className="group relative flex h-3.5 w-3.5 cursor-default items-center justify-center rounded-full border border-neutral-600 text-[9px] text-neutral-500"
+              aria-label="Background analysis info"
+            >
+              ?
+              <span className="pointer-events-none absolute bottom-full left-1/2 mb-2 hidden w-52 -translate-x-1/2 rounded-lg border border-neutral-700 bg-neutral-800 px-2.5 py-2 text-[10px] leading-relaxed text-neutral-300 shadow-xl group-hover:block">
+                Analysis runs on the server — safe to refresh or leave this page at any time.
+              </span>
+            </span>
+          )}
         </span>
-        {/* Expand/collapse toggle */}
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          className="ml-auto text-[10px] text-neutral-500 hover:text-neutral-300"
-          title={expanded ? "Collapse" : "Settings"}
-        >
-          {expanded ? "▲" : "⚙"}
-        </button>
+        {/* Settings toggle + minimize */}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="text-[10px] text-neutral-500 hover:text-neutral-300"
+            title={expanded ? "Collapse settings" : "Settings"}
+          >
+            {expanded ? "▲" : "⚙"}
+          </button>
+          <button
+            onClick={() => setMinimized(true)}
+            className="text-[10px] text-neutral-500 hover:text-neutral-300"
+            title="Minimize"
+          >
+            ─
+          </button>
+        </div>
       </div>
 
       {/* Progress bar (running only) */}
@@ -475,7 +551,9 @@ export default function JobStatusWidget() {
                 {plyText ?? (job.last_label ? `${job.last_label}` : "Starting…")}
               </span>
               <span className="tabular-nums">
-                {job.analyzed}/{job.total}
+                {analyzedTotal != null && totalGames != null
+                  ? `${analyzedTotal}/${totalGames} games`
+                  : `${job.analyzed}/${job.total}`}
                 {job.errors > 0 ? ` · ${job.errors} err` : ""}
               </span>
             </>

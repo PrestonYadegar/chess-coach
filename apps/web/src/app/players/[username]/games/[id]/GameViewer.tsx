@@ -1,33 +1,21 @@
 "use client";
 
-import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import React, { useState, useCallback, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Chessboard } from "react-chessboard";
+import { useBoardTheme } from "@/lib/boardTheme";
 import type { Arrow } from "react-chessboard/dist/chessboard/types";
 import { Chess } from "chess.js";
 import type { PlyAnalysis } from "./page";
 import EvalChart from "./EvalChart";
-
-// Structure of each motif's evidence as stored in motif_details JSON.
-interface MotifEvidence {
-  squares?: string[];
-  pieces?: string[];
-  by_move?: string;
-  line?: string[];
-  exploiting?: string;
-}
-
-interface CandidateLine {
-  rank: number;
-  move_uci: string;
-  move_san: string;
-  eval_cp: number | null;
-  mate: number | null;
-  pv_uci: string[];
-  pv_san: string[];
-}
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import ReactMarkdown from "react-markdown";
+import { API_URL } from "@/lib/api";
+import type { MotifEvidence } from "@/lib/types";
+import { evalLabel, candidateEvalLabel, evalToWhitePct } from "@/lib/eval";
+import { uciToSan, uciSquares, buildPositions, buildMoveList, fenAfterUcis } from "@/lib/chess";
+import { prettyMotif } from "@/lib/motifs";
+import { useEngineEval } from "@/hooks/useEngineEval";
+import ExploreBreadcrumb from "@/components/ExploreBreadcrumb";
 
 interface Props {
   pgn: string;
@@ -37,66 +25,6 @@ interface Props {
   gameId: number;
   playerUsername: string;
   initialPly?: number | null;
-}
-
-function buildPositions(pgn: string): string[] {
-  const chess = new Chess();
-  try {
-    chess.loadPgn(pgn);
-  } catch {
-    return [new Chess().fen()];
-  }
-  const history = chess.history({ verbose: true });
-  const positions: string[] = [];
-  const game = new Chess();
-  positions.push(game.fen());
-  for (const move of history) {
-    game.move(move.san);
-    positions.push(game.fen());
-  }
-  return positions;
-}
-
-function buildMoveList(pgn: string): string[] {
-  const chess = new Chess();
-  try {
-    chess.loadPgn(pgn);
-  } catch {
-    return [];
-  }
-  return chess.history();
-}
-
-// Convert a UCI move to SAN given the position it was played from.
-function uciToSan(fen: string | null, uci: string | null): string | null {
-  if (!fen || !uci) return uci;
-  try {
-    const c = new Chess(fen);
-    const m = c.move({
-      from: uci.slice(0, 2),
-      to: uci.slice(2, 4),
-      promotion: uci.length > 4 ? uci.slice(4, 5) : undefined,
-    });
-    return m.san;
-  } catch {
-    return uci;
-  }
-}
-
-// Convert centipawn eval (white POV) to white's percentage of the bar (0–100).
-// Positive eval = white winning. Clamped to ±1000 cp.
-function evalToWhitePct(evalCp: number | null | undefined): number {
-  if (evalCp == null) return 50;
-  const clamped = Math.max(-1000, Math.min(1000, evalCp));
-  return 50 + (clamped / 1000) * 45; // 5%–95% range so colors always visible
-}
-
-function evalLabel(evalCp: number | null | undefined): string {
-  if (evalCp == null) return "—";
-  const abs = Math.abs(evalCp);
-  const sign = evalCp > 0 ? "+" : evalCp < 0 ? "−" : "";
-  const pawns = (abs / 100).toFixed(1);
-  return `${sign}${pawns}`;
 }
 
 const CLASSIFICATION: Record<
@@ -140,10 +68,6 @@ function ClassificationBadge({ cls }: { cls: string | null }) {
   );
 }
 
-function prettyMotif(tag: string): string {
-  return tag.replace(/_/g, " ");
-}
-
 // Parse motif_details JSON into a map of tag → evidence.
 function parseMotifDetails(raw: string | null): Record<string, MotifEvidence> {
   if (!raw) return {};
@@ -153,12 +77,6 @@ function parseMotifDetails(raw: string | null): Record<string, MotifEvidence> {
   } catch {
     return {};
   }
-}
-
-// Extract from/to squares from a UCI move string (e.g. "e2e4" → ["e2","e4"]).
-function uciSquares(uci: string | null | undefined): [string, string] | null {
-  if (!uci || uci.length < 4) return null;
-  return [uci.slice(0, 2), uci.slice(2, 4)];
 }
 
 // Build a lookup from ply (0-indexed move) to analysis row.
@@ -218,10 +136,11 @@ function computeStats(analysis: PlyAnalysis[]): { white: SideStats; black: SideS
   return { white, black };
 }
 
-function candidateEvalLabel(line: CandidateLine): string {
-  if (line.mate != null) return line.mate > 0 ? `M${line.mate}` : `-M${Math.abs(line.mate)}`;
-  return evalLabel(line.eval_cp);
-}
+const STAT_SYMBOL: Record<string, string> = {
+  Blunders: "??",
+  Mistakes: "?",
+  Inaccuracies: "?!",
+};
 
 function StatRow({
   label,
@@ -232,15 +151,19 @@ function StatRow({
   count: number;
   cls: string;
 }) {
+  const symbol = STAT_SYMBOL[label];
   return (
     <div className="flex items-center justify-between">
-      <span className={`text-sm ${cls}`}>{label}</span>
+      <span className={`text-sm ${cls}`}>
+        {label}{symbol && <span className="ml-1 font-mono text-xs opacity-60">({symbol})</span>}
+      </span>
       <span className="font-mono text-sm tabular-nums text-neutral-300">{count}</span>
     </div>
   );
 }
 
 export default function GameViewer({ pgn, white, black, analysis, gameId, playerUsername, initialPly }: Props) {
+  const [boardTheme] = useBoardTheme();
   const router = useRouter();
   const positions = useMemo(() => buildPositions(pgn), [pgn]);
   const moves = useMemo(() => buildMoveList(pgn), [pgn]);
@@ -259,32 +182,39 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
   );
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [analyzeResult, setAnalyzeResult] = useState<{ plies: number; depth: number } | null>(null);
+
+  // Engine depth used by the per-game analyze endpoint (matches its API default).
+  const ANALYZE_DEPTH = 18;
+
+  // Game Story — on-demand, collapsible
+  const [narrative, setNarrative] = useState<string | null>(null);
+  const [narrativeLoading, setNarrativeLoading] = useState(false);
+  const [narrativeError, setNarrativeError] = useState(false);
+  const [narrativeOpen, setNarrativeOpen] = useState(true);
+  const hasAnalysis = analysis.length > 0;
+
+  function generateNarrative() {
+    setNarrativeLoading(true);
+    setNarrativeError(false);
+    fetch(`${API_URL}/games/${gameId}/narrative`, { method: "POST" })
+      .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+      .then((d) => setNarrative(d.narrative))
+      .catch(() => setNarrativeError(true))
+      .finally(() => setNarrativeLoading(false));
+  }
   const [selectedMotif, setSelectedMotif] = useState<string | null>(null);
 
-  // Candidate moves from POST /positions/evaluate (mainline position)
-  const [candidates, setCandidates] = useState<CandidateLine[]>([]);
-  const [loadingCandidates, setLoadingCandidates] = useState(false);
+  // Candidate move selection / line-stepping state (the candidate *lines*
+  // themselves come from useEngineEval below).
   const [hoveredCandidate, setHoveredCandidate] = useState<number | null>(null);
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
   const [lineStep, setLineStep] = useState(0); // 0 = base position, N = N moves into the candidate PV
-  const candidateFetchRef = useRef<string | null>(null);
-
-  // Live re-evaluation of the position you've stepped into within a candidate
-  // line — so the line keeps being analyzed (eval + best continuation) as you
-  // explore deeper, rather than only showing the originally-stored PV.
-  const [lineProbe, setLineProbe] = useState<CandidateLine | null>(null);
-  const [loadingLineProbe, setLoadingLineProbe] = useState(false);
-  const lineProbeFetchRef = useRef<string | null>(null);
 
   // Explore mode state
   const [exploreMode, setExploreMode] = useState(false);
   const [exploreLine, setExploreLine] = useState<string[]>([]); // UCI moves from current mainline position
   const [exploreSanLine, setExploreSanLine] = useState<string[]>([]); // SAN labels for breadcrumb
-  const [exploreCandidates, setExploreCandidates] = useState<CandidateLine[]>([]);
-  const [exploreEvalCp, setExploreEvalCp] = useState<number | null>(null);
-  const [loadingExploreCandidates, setLoadingExploreCandidates] = useState(false);
-  const exploreDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const exploreFetchRef = useRef<string | null>(null);
 
   const flipBoard = () =>
     setOrientation((o) => (o === "white" ? "black" : "white"));
@@ -292,14 +222,17 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
   async function runAnalysis() {
     setAnalyzing(true);
     setAnalyzeError(null);
+    setAnalyzeResult(null);
     try {
-      const res = await fetch(`${API_URL}/games/${gameId}/analyze`, {
+      const res = await fetch(`${API_URL}/games/${gameId}/analyze?depth=${ANALYZE_DEPTH}`, {
         method: "POST",
       });
       if (!res.ok) {
         const body = await res.text();
         throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
       }
+      const data = await res.json();
+      setAnalyzeResult({ plies: data.plies_analyzed ?? 0, depth: ANALYZE_DEPTH });
       router.refresh();
     } catch (e) {
       setAnalyzeError(e instanceof Error ? e.message : String(e));
@@ -317,97 +250,36 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
       // Reset explore line when navigating mainline
       setExploreLine([]);
       setExploreSanLine([]);
-      setExploreCandidates([]);
-      setExploreEvalCp(null);
     },
     [positions.length]
   );
 
   const currentFen = positions[cursor] ?? positions[0];
-  const hasAnalysis = analysis.length > 0;
 
   // Compute the FEN at the end of the explore line.
   const exploreFen = useMemo(() => {
     if (exploreLine.length === 0) return null;
-    try {
-      const chess = new Chess(currentFen);
-      for (const uci of exploreLine) {
-        chess.move({
-          from: uci.slice(0, 2),
-          to: uci.slice(2, 4),
-          promotion: uci.length > 4 ? uci.slice(4, 5) : undefined,
-        });
-      }
-      return chess.fen();
-    } catch {
-      return null;
-    }
+    return fenAfterUcis(currentFen, exploreLine);
   }, [currentFen, exploreLine]);
 
-  // Debounced eval fetch for the explored position.
-  useEffect(() => {
-    if (!exploreFen) {
-      setExploreCandidates([]);
-      setExploreEvalCp(null);
-      return;
-    }
-    if (exploreDebounceRef.current) clearTimeout(exploreDebounceRef.current);
-    exploreDebounceRef.current = setTimeout(() => {
-      const fen = exploreFen;
-      exploreFetchRef.current = fen;
-      setLoadingExploreCandidates(true);
-      fetch(`${API_URL}/positions/evaluate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen, depth: 18, multipv: 3 }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          if (exploreFetchRef.current !== fen) return;
-          const lines: CandidateLine[] = data.lines ?? [];
-          setExploreCandidates(lines);
-          setExploreEvalCp(lines[0]?.eval_cp ?? null);
-        })
-        .catch(() => {
-          if (exploreFetchRef.current !== fen) return;
-          setExploreCandidates([]);
-          setExploreEvalCp(null);
-        })
-        .finally(() => {
-          if (exploreFetchRef.current === fen) setLoadingExploreCandidates(false);
-        });
-    }, 500);
-  }, [exploreFen]);
+  // Debounced eval of the explored position (multipv 3).
+  const { lines: exploreCandidates, loading: loadingExploreCandidates } = useEngineEval(
+    exploreFen,
+    { multipv: 3, debounceMs: 500 }
+  );
+  const exploreEvalCp = exploreCandidates[0]?.eval_cp ?? null;
 
-  // Fetch top-3 candidates whenever the mainline position changes (and analysis exists).
+  // Reset selection/stepping when the mainline position changes.
   useEffect(() => {
-    if (!hasAnalysis) {
-      setCandidates([]);
-      return;
-    }
-    const fen = currentFen;
-    candidateFetchRef.current = fen;
-    setLoadingCandidates(true);
     setSelectedCandidate(null);
     setLineStep(0);
-    fetch(`${API_URL}/positions/evaluate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fen, depth: 18, multipv: 3 }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (candidateFetchRef.current !== fen) return; // stale
-        setCandidates((data.lines as CandidateLine[]) ?? []);
-      })
-      .catch(() => {
-        if (candidateFetchRef.current !== fen) return;
-        setCandidates([]);
-      })
-      .finally(() => {
-        if (candidateFetchRef.current === fen) setLoadingCandidates(false);
-      });
   }, [currentFen, hasAnalysis]);
+
+  // Top-3 candidates for the mainline position (only when analysis exists).
+  const { lines: candidates, loading: loadingCandidates } = useEngineEval(
+    hasAnalysis ? currentFen : null,
+    { multipv: 3 }
+  );
 
   // Handle a piece drop in explore mode. Returns true if the move was legal.
   function onPieceDrop(sourceSquare: string, targetSquare: string, piece: string): boolean {
@@ -441,8 +313,6 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
   function returnToGame() {
     setExploreLine([]);
     setExploreSanLine([]);
-    setExploreCandidates([]);
-    setExploreEvalCp(null);
   }
 
   function toggleExploreMode() {
@@ -451,8 +321,6 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
         // Exiting — clear explore state
         setExploreLine([]);
         setExploreSanLine([]);
-        setExploreCandidates([]);
-        setExploreEvalCp(null);
       }
       return !prev;
     });
@@ -498,16 +366,7 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
     // Candidate line stepping (mainline mode).
     const cand = selectedCandidate !== null ? candidates[selectedCandidate] : null;
     if (!cand || lineStep === 0) return currentFen;
-    try {
-      const chess = new Chess(currentFen);
-      const pvMoves = cand.pv_uci.slice(0, lineStep);
-      for (const uci of pvMoves) {
-        chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.length > 4 ? uci.slice(4, 5) : undefined });
-      }
-      return chess.fen();
-    } catch {
-      return currentFen;
-    }
+    return fenAfterUcis(currentFen, cand.pv_uci.slice(0, lineStep)) ?? currentFen;
   }, [exploreMode, exploreFen, currentFen, selectedCandidate, candidates, lineStep]);
 
   // The next move in the candidate line (for the arrow overlay when stepping).
@@ -520,32 +379,11 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
   // Keep evaluating the line as you step into it: each time the displayed
   // position changes while stepping a candidate line, ask the engine to
   // (re)evaluate that exact position. Cache-backed, so repeats are instant.
-  useEffect(() => {
-    if (exploreMode || lineStep === 0 || !hasAnalysis) {
-      setLineProbe(null);
-      return;
-    }
-    const fen = displayFen;
-    lineProbeFetchRef.current = fen;
-    setLoadingLineProbe(true);
-    fetch(`${API_URL}/positions/evaluate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fen, depth: 18, multipv: 1 }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (lineProbeFetchRef.current !== fen) return; // stale
-        const lines = (data.lines as CandidateLine[]) ?? [];
-        setLineProbe(lines[0] ?? null);
-      })
-      .catch(() => {
-        if (lineProbeFetchRef.current === fen) setLineProbe(null);
-      })
-      .finally(() => {
-        if (lineProbeFetchRef.current === fen) setLoadingLineProbe(false);
-      });
-  }, [displayFen, lineStep, exploreMode, hasAnalysis]);
+  const { lines: lineProbeLines, loading: loadingLineProbe } = useEngineEval(
+    !exploreMode && lineStep > 0 && hasAnalysis ? displayFen : null,
+    { multipv: 1 }
+  );
+  const lineProbe = lineProbeLines[0] ?? null;
 
   // Arrow from hover or selected candidate at base position.
   const previewUci = useMemo(() => {
@@ -640,180 +478,243 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
     "px-3 py-1.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-30 disabled:hover:bg-transparent transition-colors";
 
   return (
-    <div className="flex flex-col gap-6 lg:flex-row">
-      {/* Board + eval bar */}
-      <div className="flex flex-col items-center gap-3">
-        <div className="text-sm text-neutral-400">
-          {orientation === "white" ? `${black} (Black)` : `${white} (White)`}
-        </div>
+    <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
 
-        <div className="flex items-stretch gap-3">
-          {/* Eval bar with label rendered inside */}
-          {hasAnalysis && (
-            <div
-              className="relative flex w-9 flex-col overflow-hidden rounded border border-neutral-700"
-              style={{ height: 480 }}
-              title={`Eval: ${evalLabel(currentEval)}`}
-            >
-              {/* Black portion (top) */}
-              <div
-                className="bg-neutral-800 transition-all duration-150"
-                style={{ height: `${100 - whitePct}%` }}
-              />
-              {/* White portion (bottom) */}
-              <div
-                className="bg-neutral-100 transition-all duration-150"
-                style={{ height: `${whitePct}%` }}
-              />
-              {/* Eval label — sits on the side of whoever is ahead */}
-              <span
-                className={`absolute inset-x-0 text-center text-xs font-extrabold tabular-nums ${
-                  (currentEval ?? 0) >= 0
-                    ? "bottom-1.5 text-neutral-900"
-                    : "top-1.5 text-neutral-100"
-                }`}
-              >
-                {loadingExploreCandidates && isExploring ? "…" : evalLabel(currentEval)}
-              </span>
+      {/* Left column: game story */}
+      {hasAnalysis && (
+        <div className="w-full lg:w-96 xl:w-[28rem] flex-shrink-0 rounded-lg border border-neutral-800">
+          {/* Header — always visible */}
+          <button
+            onClick={() => setNarrativeOpen((o) => !o)}
+            className="flex w-full items-center justify-between px-4 py-3 text-left"
+          >
+            <span className="text-sm font-semibold uppercase tracking-wider text-neutral-500">Game story</span>
+            <span className="text-xs text-neutral-600">{narrativeOpen ? "▲" : "▼"}</span>
+          </button>
+
+          {narrativeOpen && (
+            <div className="border-t border-neutral-800 px-4 pb-4 pt-3">
+              {!narrative && !narrativeLoading && !narrativeError && (
+                <button
+                  onClick={generateNarrative}
+                  className="w-full rounded-lg bg-emerald-700 py-2 text-xs font-semibold text-white hover:bg-emerald-600 transition-colors"
+                >
+                  Generate story
+                </button>
+              )}
+              {narrativeLoading && (
+                <div className="space-y-2 animate-pulse">
+                  {[100, 92, 96, 85, 90, 80].map((w, i) => (
+                    <div key={i} className="h-2.5 rounded bg-neutral-800" style={{ width: `${w}%` }} />
+                  ))}
+                </div>
+              )}
+              {narrativeError && (
+                <div className="space-y-2">
+                  <p className="text-xs text-red-400">Could not generate — check AI coach settings.</p>
+                  <button onClick={generateNarrative} className="text-xs text-neutral-500 underline hover:text-neutral-300">
+                    Retry
+                  </button>
+                </div>
+              )}
+              {narrative && (
+                <div className="text-sm leading-relaxed text-neutral-400">
+                  <ReactMarkdown
+                    components={{
+                      h3: ({ children }) => <h3 className="mb-1.5 mt-4 first:mt-0 text-xs font-semibold uppercase tracking-wider text-neutral-500">{children}</h3>,
+                      p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+                      strong: ({ children }) => <strong className="font-medium text-neutral-200">{children}</strong>,
+                    }}
+                  >
+                    {narrative}
+                  </ReactMarkdown>
+                  <button
+                    onClick={() => {
+                      fetch(`${API_URL}/games/${gameId}/narrative`, { method: "DELETE" }).catch(() => {});
+                      setNarrative(null);
+                      setNarrativeError(false);
+                    }}
+                    className="mt-3 text-xs text-neutral-600 underline hover:text-neutral-400"
+                  >
+                    Regenerate
+                  </button>
+                </div>
+              )}
             </div>
           )}
+        </div>
+      )}
 
-          <div className="w-full max-w-[480px]">
+      {/* Board + eval bar — flex-1, inner wrapper sizes to content so everything below aligns */}
+      <div className="flex flex-1 flex-col items-center gap-3">
+        <div className="flex flex-col gap-3">
+          {/* Opponent label */}
+          <div className={`w-[480px] text-center text-sm text-neutral-400 ${hasAnalysis ? "self-end" : ""}`}>
+            {orientation === "white" ? `${black} (Black)` : `${white} (White)`}
+          </div>
+
+          <div className="flex items-stretch gap-3">
+            {/* Eval bar with label rendered inside */}
+            {hasAnalysis && (
+              <div
+                className="relative flex w-9 flex-col overflow-hidden rounded border border-neutral-700"
+                style={{ height: 480 }}
+                title={`Eval: ${evalLabel(currentEval)}`}
+              >
+                {/* Black portion (top) */}
+                <div
+                  className="bg-neutral-800 transition-all duration-150"
+                  style={{ height: `${100 - whitePct}%` }}
+                />
+                {/* White portion (bottom) */}
+                <div
+                  className="bg-neutral-100 transition-all duration-150"
+                  style={{ height: `${whitePct}%` }}
+                />
+                {/* Eval label — sits on the side of whoever is ahead */}
+                <span
+                  className={`absolute inset-x-0 text-center text-xs font-extrabold tabular-nums ${
+                    (currentEval ?? 0) >= 0
+                      ? "bottom-1.5 text-neutral-900"
+                      : "top-1.5 text-neutral-100"
+                  }`}
+                >
+                  {loadingExploreCandidates && isExploring ? "…" : evalLabel(currentEval)}
+                </span>
+              </div>
+            )}
+
             <Chessboard
               position={displayFen}
               boardWidth={480}
               arePiecesDraggable={exploreMode}
               onPieceDrop={onPieceDrop}
               boardOrientation={orientation}
-              customDarkSquareStyle={{ backgroundColor: "#4a7c59" }}
-              customLightSquareStyle={{ backgroundColor: "#f0d9b5" }}
+              customDarkSquareStyle={{ backgroundColor: boardTheme.dark }}
+              customLightSquareStyle={{ backgroundColor: boardTheme.light }}
               customArrows={customArrows}
               customSquareStyles={customSquareStyles}
             />
           </div>
-        </div>
 
-        <div className="text-sm text-neutral-400">
-          {orientation === "white" ? `${white} (White)` : `${black} (Black)`}
-        </div>
+          {/* Player label */}
+          <div className={`w-[480px] text-center text-sm text-neutral-400 ${hasAnalysis ? "self-end" : ""}`}>
+            {orientation === "white" ? `${white} (White)` : `${black} (Black)`}
+          </div>
 
-        {/* Navigation controls — unified segmented bar */}
-        <div className="flex items-center gap-2 text-sm">
-          <div className="flex items-center divide-x divide-neutral-800 overflow-hidden rounded-lg border border-neutral-700">
-            <button onClick={() => goTo(0)} disabled={cursor === 0 || exploreMode} className={navBtn} title="Start">
-              «
-            </button>
-            <button onClick={() => goTo(cursor - 1)} disabled={cursor === 0 || exploreMode} className={navBtn} title="Previous">
-              ‹
-            </button>
-            <span className="min-w-[96px] px-2 py-1.5 text-center text-neutral-500">
-              {isExploring
-                ? `+${exploreLine.length} move${exploreLine.length !== 1 ? "s" : ""}`
-                : cursor === 0
-                ? "Start"
-                : `Move ${Math.ceil(cursor / 2)} ${cursor % 2 === 1 ? "(W)" : "(B)"}`}
-            </span>
+          {/* Navigation controls — unified segmented bar */}
+          <div className={`flex w-[480px] items-center justify-center gap-2 text-sm ${hasAnalysis ? "self-end" : ""}`}>
+            <div className="flex items-center divide-x divide-neutral-800 overflow-hidden rounded-lg border border-neutral-700">
+              <button onClick={() => goTo(0)} disabled={cursor === 0 || exploreMode} className={navBtn} title="Start">
+                «
+              </button>
+              <button onClick={() => goTo(cursor - 1)} disabled={cursor === 0 || exploreMode} className={navBtn} title="Previous">
+                ‹
+              </button>
+              <span className="min-w-[96px] px-2 py-1.5 text-center text-neutral-500">
+                {isExploring
+                  ? `+${exploreLine.length} move${exploreLine.length !== 1 ? "s" : ""}`
+                  : cursor === 0
+                  ? "Start"
+                  : `Move ${Math.ceil(cursor / 2)} ${cursor % 2 === 1 ? "(W)" : "(B)"}`}
+              </span>
+              <button
+                onClick={() => goTo(cursor + 1)}
+                disabled={cursor === positions.length - 1 || exploreMode}
+                className={navBtn}
+                title="Next"
+              >
+                ›
+              </button>
+              <button
+                onClick={() => goTo(positions.length - 1)}
+                disabled={cursor === positions.length - 1 || exploreMode}
+                className={navBtn}
+                title="End"
+              >
+                »
+              </button>
+            </div>
             <button
-              onClick={() => goTo(cursor + 1)}
-              disabled={cursor === positions.length - 1 || exploreMode}
-              className={navBtn}
-              title="Next"
+              onClick={flipBoard}
+              className="rounded-lg border border-neutral-700 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
+              title="Flip board"
             >
-              ›
-            </button>
-            <button
-              onClick={() => goTo(positions.length - 1)}
-              disabled={cursor === positions.length - 1 || exploreMode}
-              className={navBtn}
-              title="End"
-            >
-              »
+              ⇅
             </button>
           </div>
-          <button
-            onClick={flipBoard}
-            className="rounded-lg border border-neutral-700 px-3 py-1.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
-            title="Flip board"
-          >
-            ⇅
-          </button>
-        </div>
 
-        {/* Eval graph across the game — click to jump to a move */}
-        {hasAnalysis && (
-          <div className="w-full max-w-[480px]">
-            <EvalChart
-              analysis={analysis}
-              cursor={cursor}
-              onSeek={(ply) => goTo(ply + 1)}
-            />
-          </div>
-        )}
-
-        {/* Explore mode toggle */}
-        <div className="flex flex-col items-center gap-2 w-full max-w-[480px]">
-          <button
-            onClick={toggleExploreMode}
-            className={`w-full rounded-lg border px-4 py-2 text-sm font-semibold transition-colors ${
-              exploreMode
-                ? "border-violet-500/60 bg-violet-600/20 text-violet-300 hover:bg-violet-600/30"
-                : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
-            }`}
-            title={exploreMode ? "Exit explore mode" : "Explore alternative lines from this position"}
-          >
-            {exploreMode ? "✕ Exit Explore Mode" : "⬡ Explore from here"}
-          </button>
-
-          {/* Breadcrumb + return when exploring */}
-          {exploreMode && (
-            <div className="flex w-full flex-col gap-1.5">
-              {exploreSanLine.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1 rounded border border-violet-500/20 bg-violet-500/5 px-2 py-1.5">
-                  <span className="text-xs text-violet-400 font-semibold mr-1">Exploring:</span>
-                  {exploreSanLine.map((san, i) => (
-                    <span
-                      key={i}
-                      className="font-mono text-xs rounded bg-neutral-800 px-1.5 py-0.5 text-violet-200"
-                    >
-                      {san}
-                    </span>
-                  ))}
-                  <button
-                    onClick={returnToGame}
-                    className="ml-auto text-xs text-neutral-500 hover:text-neutral-300 underline"
-                  >
-                    Return to game
-                  </button>
-                </div>
-              )}
-              {exploreSanLine.length === 0 && (
-                <p className="text-xs text-center text-violet-400/70">
-                  Drag pieces to explore alternative lines
-                </p>
-              )}
+          {/* Eval graph across the game — click to jump to a move */}
+          {hasAnalysis && (
+            <div className="pl-[48px]">
+              <EvalChart
+                analysis={analysis}
+                cursor={cursor}
+                onSeek={(ply) => goTo(ply + 1)}
+              />
             </div>
           )}
-        </div>
 
-        {/* Analysis trigger */}
-        <div className="flex flex-col items-center gap-1">
-          <button
-            onClick={runAnalysis}
-            disabled={analyzing}
-            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-          >
-            {analyzing
-              ? "Analyzing… (this can take a minute)"
-              : hasAnalysis
-              ? "Re-analyze game"
-              : "Analyze this game"}
-          </button>
-          {analyzeError && <p className="text-xs text-red-400">{analyzeError}</p>}
+          {/* Explore mode toggle */}
+          <div className={`flex flex-col gap-2 ${hasAnalysis ? "pl-[48px]" : ""}`}>
+            <button
+              onClick={toggleExploreMode}
+              className={`w-full rounded-lg border px-4 py-2 text-sm font-semibold transition-colors ${
+                exploreMode
+                  ? "border-violet-500/60 bg-violet-600/20 text-violet-300 hover:bg-violet-600/30"
+                  : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+              }`}
+              title={exploreMode ? "Exit explore mode" : "Explore alternative lines from this position"}
+            >
+              {exploreMode ? "✕ Exit Explore Mode" : "⬡ Explore from here"}
+            </button>
+
+            {/* Breadcrumb + return when exploring */}
+            {exploreMode && (
+              <ExploreBreadcrumb
+                sanLine={exploreSanLine}
+                onReturn={returnToGame}
+                returnLabel="Return to game"
+                className="w-full"
+              />
+            )}
+          </div>
+
+          {/* Analysis trigger */}
+          <div className={`flex flex-col gap-1 ${hasAnalysis ? "pl-[48px]" : "items-center"}`}>
+            <button
+              onClick={runAnalysis}
+              disabled={analyzing}
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+            >
+              {analyzing
+                ? "Analyzing… (this can take a minute)"
+                : hasAnalysis
+                ? "Re-analyze game"
+                : "Analyze this game"}
+            </button>
+            {analyzing && (
+              <p className="text-xs text-neutral-500">
+                Running Stockfish at depth {ANALYZE_DEPTH} over every move — this can take a minute.
+              </p>
+            )}
+            {!analyzing && analyzeResult && (
+              <p className="text-xs text-emerald-400">
+                ✓ Analysis complete — {analyzeResult.plies} move{analyzeResult.plies !== 1 ? "s" : ""} evaluated at depth {analyzeResult.depth}.
+              </p>
+            )}
+            {!analyzing && !analyzeResult && hasAnalysis && (
+              <p className="text-xs text-neutral-600">
+                Engine analysis at depth {ANALYZE_DEPTH}.
+              </p>
+            )}
+            {analyzeError && <p className="text-xs text-red-400">{analyzeError}</p>}
+          </div>
         </div>
       </div>
 
       {/* Right column: analysis info + move list */}
-      <div className="flex flex-1 flex-col gap-4">
+      <div className="flex w-full flex-col gap-4 lg:w-96 xl:w-[28rem] lg:flex-shrink-0">
         {hasAnalysis && (
           <>
             {/* Explore mode panel — replaces move detail when exploring */}
@@ -886,12 +787,14 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                       <StatRow label="Mistakes" count={playerStats.mistake} cls="text-orange-400" />
                       <StatRow label="Inaccuracies" count={playerStats.inaccuracy} cls="text-yellow-400" />
                       <div className="mt-1.5 flex items-center justify-between border-t border-neutral-800 pt-1.5">
-                        <span
-                          className="cursor-help text-sm text-neutral-500 underline decoration-dotted decoration-neutral-600 underline-offset-2"
-                          title="Average centipawn loss — how much evaluation you gave up per move versus the engine's best move (100 cp = 1 pawn). Lower is better."
-                        >
-                          Avg. CP loss
-                        </span>
+                        <div className="group relative cursor-help">
+                          <span className="text-sm text-neutral-500 underline decoration-dotted decoration-neutral-600 underline-offset-2">
+                            Avg. CP loss
+                          </span>
+                          <div className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 hidden w-56 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs text-neutral-300 shadow-lg group-hover:block">
+                            Average centipawn loss — how much evaluation you gave up per move vs the engine's best. 100 cp = 1 pawn. Lower is better.
+                          </div>
+                        </div>
                         <span className="font-mono text-sm tabular-nums text-neutral-300">{playerStats.acpl}</span>
                       </div>
                     </div>
@@ -901,28 +804,27 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                       <StatRow label="Mistakes" count={oppStats.mistake} cls="text-orange-400" />
                       <StatRow label="Inaccuracies" count={oppStats.inaccuracy} cls="text-yellow-400" />
                       <div className="mt-1.5 flex items-center justify-between border-t border-neutral-800 pt-1.5">
-                        <span
-                          className="cursor-help text-sm text-neutral-500 underline decoration-dotted decoration-neutral-600 underline-offset-2"
-                          title="Average centipawn loss — how much evaluation you gave up per move versus the engine's best move (100 cp = 1 pawn). Lower is better."
-                        >
-                          Avg. CP loss
-                        </span>
+                        <div className="group relative cursor-help">
+                          <span className="text-sm text-neutral-500 underline decoration-dotted decoration-neutral-600 underline-offset-2">
+                            Avg. CP loss
+                          </span>
+                          <div className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 hidden w-56 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs text-neutral-300 shadow-lg group-hover:block">
+                            Average centipawn loss — how much evaluation you gave up per move vs the engine's best. 100 cp = 1 pawn. Lower is better.
+                          </div>
+                        </div>
                         <span className="font-mono text-sm tabular-nums text-neutral-300">{oppStats.acpl}</span>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Current move detail */}
+                {/* Current move detail — only shown when a move is selected */}
+                {justMoved && (
                 <div className="rounded-lg border border-neutral-800 p-4">
                   <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-neutral-500">
                     Move detail
                   </h2>
-                  {!justMoved ? (
-                    <p className="text-sm text-neutral-500">
-                      Step through the moves to see analysis for each position.
-                    </p>
-                  ) : (
+                  {(
                     <div className="flex flex-col gap-3">
                       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                         <span className="font-mono text-lg text-neutral-100">
@@ -1032,82 +934,43 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                             {candidates.map((cand, idx) => {
                               const isSelected = selectedCandidate === idx;
                               return (
-                                <div key={cand.rank}>
-                                  <button
-                                    className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm transition-colors ${
-                                      isSelected
-                                        ? "bg-sky-900/40 text-sky-100"
-                                        : "hover:bg-neutral-800 text-neutral-300"
-                                    }`}
-                                    onMouseEnter={() => setHoveredCandidate(idx)}
-                                    onMouseLeave={() => setHoveredCandidate(null)}
-                                    onClick={() => {
-                                      if (isSelected) {
-                                        setSelectedCandidate(null);
-                                        setLineStep(0);
-                                      } else {
-                                        setSelectedCandidate(idx);
-                                        setLineStep(0);
-                                        setSelectedMotif(null);
-                                      }
-                                    }}
-                                  >
-                                    <span className="w-4 text-xs text-neutral-600">{cand.rank}.</span>
-                                    <span className="font-mono font-semibold">{cand.move_san}</span>
-                                    <span className="ml-auto font-mono text-xs text-neutral-400">
-                                      {candidateEvalLabel(cand)}
-                                    </span>
-                                  </button>
-                                  {/* Line shown inline by default; clicking a move steps the board into it. */}
-                                  {cand.pv_san.length > 0 && (
-                                    <div className="mt-1 ml-6">
-                                      <div className="flex flex-wrap gap-1 items-center">
-                                        {cand.pv_san.slice(0, 8).map((san, si) => (
-                                          <button
-                                            key={si}
-                                            onClick={() => {
-                                              setSelectedCandidate(idx);
-                                              setSelectedMotif(null);
-                                              setLineStep(
-                                                isSelected && lineStep === si + 1 ? 0 : si + 1
-                                              );
-                                            }}
-                                            className={`rounded px-1.5 py-0.5 font-mono text-xs transition-colors ${
-                                              isSelected && lineStep === si + 1
-                                                ? "bg-sky-600 text-white"
-                                                : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
-                                            }`}
-                                          >
-                                            {san}
-                                          </button>
-                                        ))}
-                                      </div>
-                                      {/* Live re-evaluation of the position you've stepped into. */}
-                                      {isSelected && lineStep > 0 && (
-                                        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                                          <span className="text-neutral-500">
-                                            After {lineStep} {lineStep === 1 ? "move" : "moves"}:
-                                          </span>
-                                          <span className="font-mono font-semibold text-sky-300">
-                                            {loadingLineProbe || !lineProbe
-                                              ? "…"
-                                              : candidateEvalLabel(lineProbe)}
-                                          </span>
-                                          {lineProbe && lineProbe.pv_san.length > 0 && (
-                                            <span className="font-mono text-neutral-400">
-                                              best: {lineProbe.pv_san.slice(0, 5).join(" ")}
-                                            </span>
-                                          )}
-                                          <button
-                                            className="text-neutral-500 hover:text-neutral-300 underline"
-                                            onClick={() => setLineStep(0)}
-                                          >
-                                            reset
-                                          </button>
-                                        </div>
-                                      )}
-                                    </div>
-                                  )}
+                                <div key={cand.rank}
+                                  className={`flex w-full flex-wrap items-center gap-1 rounded px-2 py-1.5 transition-colors ${
+                                    isSelected ? "bg-sky-900/40" : "hover:bg-neutral-800"
+                                  }`}
+                                  onMouseEnter={() => setHoveredCandidate(idx)}
+                                  onMouseLeave={() => setHoveredCandidate(null)}
+                                >
+                                  <span className="w-4 shrink-0 text-xs text-neutral-600">{cand.rank}.</span>
+                                  {cand.pv_san.slice(0, 8).map((san, si) => (
+                                    <button
+                                      key={si}
+                                      onClick={() => {
+                                        if (isSelected && lineStep === si + 1) {
+                                          setSelectedCandidate(null);
+                                          setLineStep(0);
+                                        } else {
+                                          setSelectedCandidate(idx);
+                                          setSelectedMotif(null);
+                                          setLineStep(si + 1);
+                                        }
+                                      }}
+                                      className={`rounded px-1.5 py-0.5 font-mono text-xs transition-colors ${
+                                        isSelected && lineStep === si + 1
+                                          ? "bg-sky-600 text-white"
+                                          : isSelected
+                                          ? "bg-neutral-800 text-sky-200 hover:bg-neutral-700"
+                                          : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
+                                      }`}
+                                    >
+                                      {san}
+                                    </button>
+                                  ))}
+                                  <span className="ml-auto font-mono text-xs text-neutral-400">
+                                    {isSelected && lineStep > 0
+                                      ? loadingLineProbe || !lineProbe ? "…" : candidateEvalLabel(lineProbe)
+                                      : candidateEvalLabel(cand)}
+                                  </span>
                                 </div>
                               );
                             })}
@@ -1117,6 +980,8 @@ export default function GameViewer({ pgn, white, black, analysis, gameId, player
                     </div>
                   )}
                 </div>
+                )}
+
               </>
             )}
           </>

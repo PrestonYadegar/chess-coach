@@ -13,9 +13,29 @@ from typing import Optional
 import chess
 import chess.engine
 
+from .constants import DEFAULT_DEPTH, ENGINE_HASH_MB, ENGINE_THREADS
 from .db import get_conn
 
 STOCKFISH_PATH = shutil.which("stockfish")
+STOCKFISH_NOT_FOUND_MSG = "stockfish not found on PATH. Install it: brew install stockfish"
+
+
+def open_configured_engine(path: Optional[str] = None) -> chess.engine.SimpleEngine:
+    """Spawn a Stockfish engine and apply the shared Threads/Hash config.
+
+    Raises RuntimeError if Stockfish is not on PATH. The configure() call is
+    best-effort (some builds reject options), matching prior behavior.
+    """
+    path = path or STOCKFISH_PATH
+    if path is None:
+        raise RuntimeError(STOCKFISH_NOT_FOUND_MSG)
+    engine = chess.engine.SimpleEngine.popen_uci(path)
+    try:
+        engine.configure({"Threads": ENGINE_THREADS, "Hash": ENGINE_HASH_MB})
+    except chess.engine.EngineError:
+        pass
+    return engine
+
 
 # ── Singleton engine ──────────────────────────────────────────────────────────
 
@@ -27,15 +47,7 @@ def _get_engine() -> chess.engine.SimpleEngine:
     global _engine
     if _engine is not None:
         return _engine
-    if STOCKFISH_PATH is None:
-        raise RuntimeError(
-            "stockfish not found on PATH. Install it: brew install stockfish"
-        )
-    _engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    try:
-        _engine.configure({"Threads": 1, "Hash": 128})
-    except chess.engine.EngineError:
-        pass
+    _engine = open_configured_engine()
     return _engine
 
 
@@ -104,7 +116,7 @@ def _upsert_lines(conn: sqlite3.Connection, fen: str, infos: list, depth: int) -
 
 def evaluate_position(
     fen: str,
-    depth: int = 18,
+    depth: int = DEFAULT_DEPTH,
     multipv: int = 1,
     conn: Optional[sqlite3.Connection] = None,
 ) -> list[dict]:

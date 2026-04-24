@@ -101,6 +101,7 @@ def init_db() -> None:
                 FOREIGN KEY(username) REFERENCES players(username)
             );
             CREATE INDEX IF NOT EXISTS idx_attempts_user ON puzzle_attempts(username, attempted_at);
+            CREATE INDEX IF NOT EXISTS idx_attempts_user_puzzle ON puzzle_attempts(username, puzzle_id);
             CREATE TABLE IF NOT EXISTS player_settings (
                 username TEXT PRIMARY KEY,
                 auto_analyze INTEGER NOT NULL DEFAULT 1,
@@ -153,6 +154,27 @@ def init_db() -> None:
                 depth INTEGER NOT NULL,
                 computed_at TEXT NOT NULL,
                 PRIMARY KEY (fen, multipv_rank)
+            )
+            """
+        )
+        # app_settings: generic key/value store for server-side configuration
+        # (LLM provider, encrypted API key, etc.).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        # narratives: cached LLM game narratives keyed by game_id.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS narratives (
+                game_id  INTEGER PRIMARY KEY,
+                narrative TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(game_id) REFERENCES games(id)
             )
             """
         )

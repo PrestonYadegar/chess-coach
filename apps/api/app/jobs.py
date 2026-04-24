@@ -24,6 +24,9 @@ class Job:
         self.events: list[dict] = []
         self.cond = threading.Condition()
         self.cancel = threading.Event()
+        self._priority: set[int] = set()
+        self._priority_lock = threading.Lock()
+        self._game_done_events: dict[int, threading.Event] = {}
         self.snapshot: dict = {
             "id": self.id,
             "username": username,
@@ -69,6 +72,23 @@ class Job:
             snap["error_message"] = str(event.get("message", ""))
             snap["finished_at"] = time.time()
         self.events.append(event)
+
+    def prioritize(self, game_id: int) -> threading.Event:
+        evt = threading.Event()
+        with self._priority_lock:
+            self._priority.add(game_id)
+            self._game_done_events[game_id] = evt
+        return evt
+
+    def notify_game_done(self, game_id: int) -> None:
+        with self._priority_lock:
+            evt = self._game_done_events.pop(game_id, None)
+        if evt:
+            evt.set()
+
+    def get_priority_ids(self) -> set[int]:
+        with self._priority_lock:
+            return set(self._priority)
 
     def append(self, event: dict) -> None:
         with self.cond:
@@ -118,7 +138,12 @@ def start_job(username: str, params: dict) -> Job:
 def _run(job: Job) -> None:
     try:
         with conn_ctx() as conn:
-            gen = analyze_player_games_events(job.username, conn, **job.params)
+            gen = analyze_player_games_events(
+                job.username, conn,
+                priority_fn=job.get_priority_ids,
+                notify_done=job.notify_game_done,
+                **job.params
+            )
             try:
                 for event in gen:
                     if job.cancel.is_set():

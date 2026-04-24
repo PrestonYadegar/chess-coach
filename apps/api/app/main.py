@@ -12,11 +12,24 @@ from pydantic import BaseModel
 import httpx
 
 from .analyze import analyze_game
+from .chess_utils import format_lines, uci_to_san
 from .chesscom import sync_player_games, sync_player_games_events
+from .constants import CHAT_DEPTH, DEFAULT_DEPTH, JOB_DEFAULT_DEPTH
 from .db import conn_ctx, init_db
 from .engine_cache import evaluate_position, shutdown_engine
 from .jobs import active_job, active_job_for, get_job, start_job, stream as stream_job
+from .llm import chat as llm_chat, narrative as llm_narrative, get_llm_settings, save_llm_settings
+from .motifs_meta import MOTIF_TO_LICHESS as _MOTIF_TO_LICHESS
 from .openings import line_for_name
+from .services import (
+    classify_time_format as _classify_time_format,
+    ensure_lichess_puzzles,
+    lichess_puzzles_for_motif,
+    own_game_blunders_filter,
+    pick_target_motif,
+    record_attempt,
+    require_player,
+)
 
 
 def _get_settings(conn, username: str) -> dict:
@@ -27,12 +40,12 @@ def _get_settings(conn, username: str) -> dict:
         (username,),
     ).fetchone()
     if row is None:
-        return {"auto_analyze": True, "auto_depth": 18, "auto_workers": 4, "auto_batch": 50, "auto_time_format": None}
+        return {"auto_analyze": True, "auto_depth": 14, "auto_workers": 4, "auto_batch": 0, "auto_time_format": None}
     return {
         "auto_analyze": bool(row["auto_analyze"]),
         "auto_depth": int(row["auto_depth"]),
         "auto_workers": int(row["auto_workers"]),
-        "auto_batch": int(row["auto_batch"]) if row["auto_batch"] is not None else 50,
+        "auto_batch": int(row["auto_batch"]) if row["auto_batch"] is not None else 0,
         "auto_time_format": row["auto_time_format"],
     }
 
@@ -61,7 +74,7 @@ def _maybe_autostart_analyze(username: str) -> Optional[dict]:
             return None
         job_params: dict = {
             "depth": settings["auto_depth"],
-            "limit": settings["auto_batch"],
+            "limit": None if settings["auto_batch"] == 0 else settings["auto_batch"],
             "only_unanalyzed": True,
             "workers": settings["auto_workers"],
         }
@@ -71,25 +84,6 @@ def _maybe_autostart_analyze(username: str) -> Optional[dict]:
         return job.snapshot
     except Exception:
         return None
-
-# Map our 9 internal motif tags → Lichess theme keywords (used for LIKE search)
-_MOTIF_TO_LICHESS: dict[str, list[str]] = {
-    "hanging_piece": ["hangingPiece"],
-    "fork_missed": ["fork"],
-    "skewer_missed": ["skewer"],
-    "back_rank": ["backRankMate"],
-    "pin_missed": ["pin"],
-    "discovered_attack": ["discoveredAttack"],
-    "overloaded_piece": ["overloadedPiece"],
-    "intermezzo_missed": ["intermezzo", "zugzwang"],
-    "only_move_missed": ["defensiveMove", "quietMove"],
-    "mating_net_missed": ["mateIn1", "mateIn2", "mateIn3", "mateIn4", "mateIn5"],
-    "mating_net_allowed": ["mateIn1", "mateIn2", "mateIn3"],
-    "king_safety": ["kingsideAttack", "queensideAttack", "attackingF2F7"],
-    "pawn_structure": ["pawnEndgame", "advancedPawn"],
-    "endgame_technique": ["endgame"],
-    "opening_principle": ["opening"],
-}
 
 app = FastAPI(title="chess-coach api", version="0.0.0")
 
@@ -202,8 +196,8 @@ def sync_player_stream(username: str, full: bool = False) -> StreamingResponse:
 
 
 class AnalyzeJobIn(BaseModel):
-    depth: int = 14
-    limit: int = 50
+    depth: int = JOB_DEFAULT_DEPTH
+    limit: Optional[int] = None   # None = all unanalyzed games
     only_unanalyzed: bool = True
     workers: int = 1
     time_classes: Optional[list[str]] = None
@@ -220,9 +214,7 @@ def start_analyze_job(username: str, body: AnalyzeJobIn) -> dict:
     if not username:
         raise HTTPException(status_code=400, detail="username required")
     with conn_ctx() as conn:
-        if not conn.execute(
-            "SELECT 1 FROM players WHERE username = ?", (username,)
-        ).fetchone():
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
     params = {
         "depth": body.depth,
@@ -326,7 +318,7 @@ def update_player_settings(username: str, body: PlayerSettingsIn) -> dict:
             auto_time_format = None
         auto_depth = max(1, min(30, int(auto_depth)))
         auto_workers = max(1, min(16, int(auto_workers)))
-        auto_batch = max(1, min(1000, int(auto_batch)))
+        auto_batch = max(0, min(1000, int(auto_batch)))
         conn.execute(
             "INSERT INTO player_settings (username, auto_analyze, auto_depth, auto_workers, auto_batch, auto_time_format)"
             " VALUES (?, ?, ?, ?, ?, ?)"
@@ -351,10 +343,7 @@ def update_player_settings(username: str, body: PlayerSettingsIn) -> dict:
 def analyze_player_status(username: str) -> dict:
     username = username.strip().lower()
     with conn_ctx() as conn:
-        row = conn.execute(
-            "SELECT username FROM players WHERE username = ?", (username,)
-        ).fetchone()
-        if not row:
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
         total = conn.execute(
             "SELECT COUNT(*) FROM games WHERE player_username = ?", (username,)
@@ -368,7 +357,26 @@ def analyze_player_status(username: str) -> dict:
 
 
 @app.post("/games/{game_id}/analyze")
-def analyze(game_id: int, depth: int = Query(default=18, ge=1, le=30)) -> dict:
+def analyze(game_id: int, depth: int = Query(default=DEFAULT_DEPTH, ge=1, le=30)) -> dict:
+    with conn_ctx() as conn:
+        row = conn.execute(
+            "SELECT g.id, g.player_username FROM games g WHERE g.id = ?", (game_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="game not found")
+        username = row["player_username"]
+        already_analyzed = conn.execute(
+            "SELECT 1 FROM analyses WHERE game_id = ? LIMIT 1", (game_id,)
+        ).fetchone() is not None
+
+    # If a job is running for this player and the game hasn't been analyzed yet,
+    # let the job do it (avoid lock contention) by adding it to the priority queue.
+    job = active_job_for(username)
+    if job and job.snapshot["status"] == "running" and not already_analyzed:
+        evt = job.prioritize(game_id)
+        evt.wait(timeout=300)  # wait up to 5 min for the job to analyze it
+
+    # Re-analyze directly (either no job, game already done, or post-job re-analysis).
     try:
         with conn_ctx() as conn:
             return analyze_game(game_id, conn, depth=depth)
@@ -419,10 +427,7 @@ def get_player_patterns(
 ) -> dict:
     username = username.strip().lower()
     with conn_ctx() as conn:
-        row = conn.execute(
-            "SELECT username FROM players WHERE username = ?", (username,)
-        ).fetchone()
-        if not row:
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
 
         # Fetch all games for filter-value discovery
@@ -570,10 +575,7 @@ def get_player_drill(
     """
     username = username.strip().lower()
     with conn_ctx() as conn:
-        row = conn.execute(
-            "SELECT username FROM players WHERE username = ?", (username,)
-        ).fetchone()
-        if not row:
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
 
         # ── Determine target motif ────────────────────────────────────────────
@@ -582,44 +584,15 @@ def get_player_drill(
             raise HTTPException(status_code=400, detail=f"unknown motif: {target_motif}")
 
         if not target_motif:
-            # Pick the user's most frequent mistake motif automatically
-            mistake_rows = conn.execute(
-                "SELECT a.motif_tags, a.ply, g.white FROM analyses a"
-                " JOIN games g ON g.id = a.game_id"
-                " WHERE g.player_username = ?"
-                "   AND a.motif_tags IS NOT NULL"
-                "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
-                " ORDER BY a.game_id DESC LIMIT 500",
-                (username,),
-            ).fetchall()
-            counts: dict[str, int] = defaultdict(int)
-            for mr in mistake_rows:
-                # Only the player's own moves (see patterns endpoint for rationale).
-                player_is_white = (mr["white"] or "").strip().lower() == username
-                if ((mr["ply"] % 2) == 0) != player_is_white:
-                    continue
-                try:
-                    tags = json.loads(mr["motif_tags"])
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                for t in tags:
-                    if t in _MOTIF_TO_LICHESS:
-                        counts[t] += 1
-            target_motif = max(counts, key=lambda m: counts[m]) if counts else None
+            # Pick the user's most frequent mistake motif automatically (own moves).
+            target_motif = pick_target_motif(conn, username, own_moves_only=True)
 
         items: list[dict] = []
 
         # ── (a) Lichess puzzles matching the motif ────────────────────────────
         if target_motif:
-            lichess_themes = _MOTIF_TO_LICHESS[target_motif]
-            like_clauses = " OR ".join("themes LIKE ?" for _ in lichess_themes)
-            like_params = [f"%{t}%" for t in lichess_themes]
-            puzzle_rows = conn.execute(
-                f"SELECT id, fen, solution_moves, themes FROM puzzles"
-                f" WHERE ({like_clauses})"
-                f" ORDER BY RANDOM() LIMIT ?",
-                like_params + [limit],
-            ).fetchall()
+            ensure_lichess_puzzles(conn, username, target_motif)
+            puzzle_rows = lichess_puzzles_for_motif(conn, target_motif, limit, username=username)
             for pr in puzzle_rows:
                 try:
                     themes_list = json.loads(pr["themes"])
@@ -637,18 +610,14 @@ def get_player_drill(
                 )
 
         # ── (b) Own-game pre-blunder positions ───────────────────────────────
-        own_where = (
-            "g.player_username = ? AND a.classification IN ('blunder', 'mistake')"
-        )
-        own_params: list = [username]
-        if target_motif:
-            own_where += " AND a.motif_tags LIKE ?"
-            own_params.append(f"%{target_motif}%")
+        own_where, own_params = own_game_blunders_filter(username, target_motif)
 
         own_rows = conn.execute(
             f"SELECT a.game_id, a.ply, a.fen, a.best_move, a.played_move,"
-            f"       a.classification, a.motif_tags"
+            f"       a.classification, a.motif_tags, a.motif_details, a.eval_cp,"
+            f"       prev.eval_cp AS eval_cp_before"
             f" FROM analyses a JOIN games g ON g.id = a.game_id"
+            f" LEFT JOIN analyses prev ON prev.game_id = a.game_id AND prev.ply = a.ply - 1"
             f" WHERE {own_where}"
             f" ORDER BY RANDOM() LIMIT ?",
             own_params + [max(1, limit // 3)],
@@ -658,17 +627,36 @@ def get_player_drill(
                 tags = json.loads(or_["motif_tags"] or "[]")
             except (json.JSONDecodeError, TypeError):
                 tags = []
+            try:
+                motif_details = json.loads(or_["motif_details"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                motif_details = {}
+            fen = or_["fen"]
+            board = chess.Board(fen)
+
+            def _san1(uci: str | None) -> str | None:
+                if not uci:
+                    return None
+                try:
+                    return board.san(chess.Move.from_uci(uci))
+                except Exception:
+                    return uci
+
             items.append(
                 {
                     "type": "own_game",
                     "game_id": or_["game_id"],
                     "ply": or_["ply"],
-                    "fen": or_["fen"],
-                    "best_move": or_["best_move"],
-                    "played_move": or_["played_move"],
+                    "fen": fen,
+                    "best_move": _san1(or_["best_move"]),
+                    "played_move": _san1(or_["played_move"]),
                     "classification": or_["classification"],
                     "motif_tags": tags,
+                    "motif_details": motif_details,
                     "motif": target_motif,
+                    "eval_cp": or_["eval_cp"],
+                    "eval_cp_before": or_["eval_cp_before"],
+                    "player_color": "white" if (or_["ply"] % 2 == 0) else "black",
                 }
             )
 
@@ -691,12 +679,8 @@ class PuzzleAttemptIn(BaseModel):
 @app.post("/puzzle_attempts", status_code=201)
 def record_puzzle_attempt(body: PuzzleAttemptIn) -> dict:
     username = body.username.strip().lower()
-    now = datetime.now(timezone.utc).isoformat()
     with conn_ctx() as conn:
-        player_row = conn.execute(
-            "SELECT username FROM players WHERE username = ?", (username,)
-        ).fetchone()
-        if not player_row:
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
 
         puzzle_row = conn.execute(
@@ -705,40 +689,13 @@ def record_puzzle_attempt(body: PuzzleAttemptIn) -> dict:
         if not puzzle_row:
             raise HTTPException(status_code=404, detail="puzzle not found")
 
-        cur = conn.execute(
-            "INSERT INTO puzzle_attempts (puzzle_id, username, solved, attempted_at)"
-            " VALUES (?, ?, ?, ?)",
-            (body.puzzle_id, username, int(body.solved), now),
-        )
-        attempt_id = cur.lastrowid
-
-    return {
-        "id": attempt_id,
-        "puzzle_id": body.puzzle_id,
-        "username": username,
-        "solved": body.solved,
-        "attempted_at": now,
-    }
+        return record_attempt(conn, body.puzzle_id, username, body.solved)
 
 
 class EvaluatePositionIn(BaseModel):
     fen: str
-    depth: int = 18
+    depth: int = DEFAULT_DEPTH
     multipv: int = 1
-
-
-def _uci_to_san(board: chess.Board, uci_moves: list[str]) -> list[str]:
-    """Apply UCI moves from `board` (copied) and return SAN strings."""
-    b = board.copy()
-    san_moves = []
-    for uci in uci_moves:
-        try:
-            move = chess.Move.from_uci(uci)
-            san_moves.append(b.san(move))
-            b.push(move)
-        except (ValueError, AssertionError):
-            break
-    return san_moves
 
 
 @app.post("/positions/evaluate")
@@ -767,27 +724,7 @@ def evaluate_position_endpoint(body: EvaluatePositionIn) -> dict:
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    lines = []
-    for line in raw_lines:
-        pv_uci = line["pv"]
-        move_uci = line["move_uci"]
-        # Compute SAN for the first (best) move
-        try:
-            move_san = board.san(chess.Move.from_uci(move_uci)) if move_uci else ""
-        except (ValueError, AssertionError):
-            move_san = move_uci
-        pv_san = _uci_to_san(board, pv_uci)
-        lines.append(
-            {
-                "rank": line["rank"],
-                "move_uci": move_uci,
-                "move_san": move_san,
-                "eval_cp": line["eval_cp"],
-                "mate": line["mate"],
-                "pv_uci": pv_uci,
-                "pv_san": pv_san,
-            }
-        )
+    lines = format_lines(board, raw_lines)
 
     actual_depth = raw_lines[0]["depth"] if raw_lines else body.depth
     return {"lines": lines, "depth": actual_depth}
@@ -806,10 +743,7 @@ def list_player_games(
 ) -> dict:
     username = username.strip().lower()
     with conn_ctx() as conn:
-        row = conn.execute(
-            "SELECT username FROM players WHERE username = ?", (username,)
-        ).fetchone()
-        if not row:
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
 
         conditions = ["player_username = ?"]
@@ -861,29 +795,6 @@ def list_player_games(
     }
 
 
-def _classify_time_format(tc: Optional[str]) -> str:
-    """Classify a Chess.com time_control string into Bullet/Blitz/Rapid/Classical/Daily."""
-    if not tc:
-        return "Unknown"
-    if "/" in tc:
-        return "Daily"
-    parts = tc.split("+")
-    try:
-        base_secs = int(parts[0])
-    except ValueError:
-        return "Unknown"
-    inc = int(parts[1]) if len(parts) > 1 else 0
-    # Estimated total seconds for ~40 moves (FIDE formula approximation)
-    total = base_secs + 40 * inc
-    if total < 179:
-        return "Bullet"
-    if total < 599:
-        return "Blitz"
-    if total < 1799:
-        return "Rapid"
-    return "Classical"
-
-
 def _wld(result: str, is_white: bool) -> str:
     if result == "1/2-1/2":
         return "draws"
@@ -910,10 +821,7 @@ def get_player_stats(
 ) -> dict:
     username = username.strip().lower()
     with conn_ctx() as conn:
-        row = conn.execute(
-            "SELECT username FROM players WHERE username = ?", (username,)
-        ).fetchone()
-        if not row:
+        if not require_player(conn, username):
             raise HTTPException(status_code=404, detail="player not found")
 
         rows = conn.execute(
@@ -1066,3 +974,295 @@ def _eval_summaries(conn, username: str, game_ids: list[int]) -> dict[int, dict]
             "eval_series": series,
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# LLM settings
+# ---------------------------------------------------------------------------
+
+class LLMSettingsIn(BaseModel):
+    provider: str  # "anthropic" | "openai" | "gemini" | "ollama"
+    api_key: str   # plaintext — encrypted before writing to DB
+
+
+@app.get("/settings/llm")
+def settings_llm_get():
+    """Return current provider and whether an API key is stored (never the key itself)."""
+    return get_llm_settings()
+
+
+@app.post("/settings/llm")
+def settings_llm_post(body: LLMSettingsIn):
+    valid_providers = {"anthropic", "openai", "gemini", "ollama"}
+    if body.provider not in valid_providers:
+        raise HTTPException(400, f"provider must be one of {sorted(valid_providers)}")
+    if not body.api_key.strip():
+        raise HTTPException(400, "api_key must not be empty")
+    save_llm_settings(body.provider, body.api_key.strip())
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# LLM chat
+# ---------------------------------------------------------------------------
+
+class CandidateLine(BaseModel):
+    rank: int
+    move_san: str
+    eval_cp: Optional[int] = None
+    mate: Optional[int] = None
+    pv_san: list[str] = []
+
+
+class ChatRequest(BaseModel):
+    fen: str
+    candidates: list[CandidateLine] = []
+    question: str
+    eval_cp: Optional[int] = None
+    played_move: Optional[str] = None
+    best_move: Optional[str] = None
+    classification: Optional[str] = None
+    eval_cp_before: Optional[int] = None
+    eval_cp_after: Optional[int] = None
+    user_color: Optional[str] = None
+    motif_details: Optional[dict] = None
+
+
+@app.post("/chat")
+async def chat_endpoint(body: ChatRequest):
+    if not body.question.strip():
+        raise HTTPException(400, "question must not be empty")
+
+    candidates = [c.model_dump() for c in body.candidates]
+    played_move_line: dict | None = None
+
+    # If we have the user's played move (SAN) and it's not already in the top lines,
+    # look up its concrete engine eval + PV so the LLM can reason about it directly.
+    if body.played_move and body.fen:
+        played_san = body.played_move
+        already_covered = any(c.get("move_san") == played_san for c in candidates)
+        if not already_covered:
+            try:
+                board = chess.Board(body.fen)
+                # Find the UCI for the played SAN move
+                played_uci = None
+                for m in board.legal_moves:
+                    if board.san(m) == played_san:
+                        played_uci = m.uci()
+                        break
+                if played_uci:
+                    # Push the move and evaluate the resulting position (opponent's turn)
+                    board_after = board.copy()
+                    board_after.push(chess.Move.from_uci(played_uci))
+                    raw = evaluate_position(board_after.fen(), depth=CHAT_DEPTH, multipv=1)
+                    if raw:
+                        r = raw[0]
+                        # Flip eval to be from the perspective of the side that just moved
+                        flipped_eval = -r["eval_cp"] if r["eval_cp"] is not None else None
+                        pv_san = uci_to_san(board_after, r["pv"])
+                        played_move_line = {
+                            "move_san": played_san,
+                            "eval_cp": flipped_eval,
+                            "pv_san": [played_san] + pv_san,
+                        }
+            except Exception:
+                pass  # non-fatal; proceed without it
+
+    try:
+        answer = await llm_chat(
+            fen=body.fen,
+            candidates=candidates,
+            question=body.question.strip(),
+            eval_cp=body.eval_cp,
+            played_move=body.played_move,
+            best_move=body.best_move,
+            classification=body.classification,
+            eval_cp_before=body.eval_cp_before,
+            eval_cp_after=body.eval_cp_after,
+            played_move_line=played_move_line,
+            user_color=body.user_color,
+            motif_details=body.motif_details,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"LLM provider error: {e}")
+    return {"answer": answer}
+
+
+# ---------------------------------------------------------------------------
+# Best games + narrative
+# ---------------------------------------------------------------------------
+
+@app.get("/players/{username}/best-games")
+def get_best_games(username: str, limit: int = 3) -> dict:
+    """Return the player's top games by quality (lowest acpl + fewest blunders/mistakes).
+    Only includes analyzed games with at least 20 analyzed plies."""
+    with conn_ctx() as conn:
+        # Get all analyzed game IDs for this player with enough plies
+        rows = conn.execute(
+            """
+            SELECT g.id, g.white, g.black, g.result, g.played_at,
+                   g.opening_name, g.eco, g.num_moves, g.time_control,
+                   COUNT(a.ply) as analyzed_plies
+            FROM games g
+            JOIN analyses a ON a.game_id = g.id
+            WHERE g.player_username = ?
+            GROUP BY g.id
+            HAVING analyzed_plies >= 20
+            """,
+            (username,),
+        ).fetchall()
+
+    if not rows:
+        return {"games": []}
+
+    game_ids = [r["id"] for r in rows]
+    row_by_id = {r["id"]: r for r in rows}
+
+    with conn_ctx() as conn:
+        summaries = _eval_summaries(conn, username, game_ids)
+
+    # Score each game: lower is better
+    def score(gid: int) -> float:
+        s = summaries.get(gid)
+        if not s:
+            return float("inf")
+        return s["acpl"] + s["blunders"] * 30 + s["mistakes"] * 10
+
+    ranked = sorted(game_ids, key=score)[:limit]
+
+    result = []
+    for gid in ranked:
+        r = row_by_id[gid]
+        s = summaries.get(gid, {})
+        result.append({
+            "id": gid,
+            "white": r["white"],
+            "black": r["black"],
+            "result": r["result"],
+            "played_at": r["played_at"],
+            "opening_name": r["opening_name"],
+            "eco": r["eco"],
+            "num_moves": r["num_moves"],
+            "time_control": r["time_control"],
+            "acpl": s.get("acpl", 0),
+            "blunders": s.get("blunders", 0),
+            "mistakes": s.get("mistakes", 0),
+            "inaccuracies": s.get("inaccuracies", 0),
+        })
+    return {"games": result}
+
+
+@app.post("/games/{game_id}/narrative")
+async def get_game_narrative(game_id: int) -> dict:
+    """Generate (or return cached) an LLM narrative for a game.
+    Picks 3 key positions: opening (~ply 12), biggest eval swing, final."""
+    with conn_ctx() as conn:
+        # Check cache first
+        cached = conn.execute(
+            "SELECT narrative FROM narratives WHERE game_id = ?", (game_id,)
+        ).fetchone()
+        if cached:
+            return {"narrative": cached["narrative"], "cached": True}
+
+        game = conn.execute(
+            "SELECT white, black, result, opening_name, eco, player_username "
+            "FROM games WHERE id = ?",
+            (game_id,),
+        ).fetchone()
+        if not game:
+            raise HTTPException(404, "game not found")
+
+        plies = conn.execute(
+            "SELECT ply, fen, eval_cp, classification, motif_tags "
+            "FROM analyses WHERE game_id = ? ORDER BY ply",
+            (game_id,),
+        ).fetchall()
+
+    if len(plies) < 10:
+        raise HTTPException(400, "game has insufficient analysis")
+
+    username = game["player_username"]
+
+    # ── Key position 1: opening (~ply 12, or earliest middlegame ply) ──────
+    opening_ply = min(range(len(plies)), key=lambda i: abs(plies[i]["ply"] - 12))
+    opening_pos = plies[opening_ply]
+
+    # ── Key position 2: biggest single-move eval swing ──────────────────────
+    biggest_swing_idx = 0
+    biggest_swing = 0
+    for i in range(1, len(plies)):
+        a = plies[i - 1]["eval_cp"]
+        b = plies[i]["eval_cp"]
+        if a is not None and b is not None:
+            swing = abs(b - a)
+            if swing > biggest_swing:
+                biggest_swing = swing
+                biggest_swing_idx = i
+    critical_pos = plies[biggest_swing_idx]
+
+    # ── Key position 3: final position ──────────────────────────────────────
+    final_pos = plies[-1]
+
+    key_positions = [
+        {"label": "Opening", "fen": opening_pos["fen"],
+         "eval_cp": opening_pos["eval_cp"] or 0,
+         "move_num": opening_pos["ply"] // 2 + 1},
+        {"label": "Critical moment", "fen": critical_pos["fen"],
+         "eval_cp": critical_pos["eval_cp"] or 0,
+         "move_num": critical_pos["ply"] // 2 + 1},
+        {"label": "Final position", "fen": final_pos["fen"],
+         "eval_cp": final_pos["eval_cp"] or 0,
+         "move_num": final_pos["ply"] // 2 + 1},
+    ]
+
+    # Collect dominant motifs across all plies
+    motif_counts: dict[str, int] = {}
+    for p in plies:
+        try:
+            tags = json.loads(p["motif_tags"] or "[]")
+        except Exception:
+            tags = []
+        for t in tags:
+            motif_counts[t] = motif_counts.get(t, 0) + 1
+    dominant_motifs = [m for m, _ in sorted(motif_counts.items(), key=lambda x: -x[1])[:3]]
+
+    with conn_ctx() as conn:
+        summaries = _eval_summaries(conn, username, [game_id])
+    s = summaries.get(game_id, {})
+
+    try:
+        text = await llm_narrative(
+            white=game["white"],
+            black=game["black"],
+            result=game["result"],
+            opening_name=game["opening_name"] or game["eco"],
+            player_username=username,
+            acpl=s.get("acpl", 0),
+            blunders=s.get("blunders", 0),
+            mistakes=s.get("mistakes", 0),
+            key_positions=key_positions,
+            dominant_motifs=dominant_motifs,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"LLM provider error: {e}")
+
+    # Cache it
+    with conn_ctx() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO narratives(game_id, narrative, created_at) VALUES(?, ?, ?)",
+            (game_id, text, datetime.now(timezone.utc).isoformat()),
+        )
+
+    return {"narrative": text, "cached": False}
+
+
+@app.delete("/games/{game_id}/narrative")
+def delete_game_narrative(game_id: int) -> dict:
+    """Clear the cached narrative for a game so it can be regenerated."""
+    with conn_ctx() as conn:
+        conn.execute("DELETE FROM narratives WHERE game_id = ?", (game_id,))
+    return {"ok": True}

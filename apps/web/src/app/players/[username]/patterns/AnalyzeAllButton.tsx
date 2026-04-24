@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { API_URL } from "@/lib/api";
 
 const TIME_CLASSES = ["classical", "rapid", "blitz", "bullet", "daily"] as const;
 type TimeClass = (typeof TIME_CLASSES)[number];

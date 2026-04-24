@@ -10,10 +10,6 @@ or via the helper script:
 """
 
 import json
-import random
-import sqlite3
-from collections import defaultdict
-from datetime import datetime, timezone
 from typing import Any
 
 import chess
@@ -21,30 +17,24 @@ import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 
+from .chess_utils import format_lines as _format_lines, uci_to_san as _uci_to_san
+from .constants import DEFAULT_DEPTH
 from .db import conn_ctx
 from .engine_cache import evaluate_position as _evaluate_position
+from .motifs_meta import MOTIF_TO_LICHESS as _MOTIF_TO_LICHESS
+from .services import (
+    ensure_lichess_puzzles,
+    lichess_puzzles_for_motif,
+    own_game_blunders_filter,
+    pick_target_motif,
+    record_attempt,
+    require_player,
+    top_patterns_core,
+)
 
 server = Server("chess-coach")
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-
-_MOTIF_TO_LICHESS: dict[str, list[str]] = {
-    "hanging_piece": ["hangingPiece"],
-    "fork_missed": ["fork"],
-    "skewer_missed": ["skewer"],
-    "back_rank": ["backRankMate"],
-    "pin_missed": ["pin"],
-    "discovered_attack": ["discoveredAttack"],
-    "overloaded_piece": ["overloadedPiece"],
-    "intermezzo_missed": ["intermezzo", "zugzwang"],
-    "only_move_missed": ["defensiveMove", "quietMove"],
-    "mating_net_missed": ["mateIn1", "mateIn2", "mateIn3", "mateIn4", "mateIn5"],
-    "mating_net_allowed": ["mateIn1", "mateIn2", "mateIn3"],
-    "king_safety": ["kingsideAttack", "queensideAttack", "attackingF2F7"],
-    "pawn_structure": ["pawnEndgame", "advancedPawn"],
-    "endgame_technique": ["endgame"],
-    "opening_principle": ["opening"],
-}
 
 
 def _json(obj: Any) -> str:
@@ -299,9 +289,7 @@ def _list_games(args: dict) -> dict:
     tc_filter = args.get("time_control")
 
     with conn_ctx() as conn:
-        if not conn.execute(
-            "SELECT 1 FROM players WHERE username = ?", (username,)
-        ).fetchone():
+        if not require_player(conn, username):
             raise ValueError(f"Player '{username}' not found. Run sync first.")
 
         conditions = ["player_username = ?"]
@@ -381,9 +369,7 @@ def _get_mistake_history(args: dict) -> dict:
         class_filter = "IN ('blunder', 'mistake')"
 
     with conn_ctx() as conn:
-        if not conn.execute(
-            "SELECT 1 FROM players WHERE username = ?", (username,)
-        ).fetchone():
+        if not require_player(conn, username):
             raise ValueError(f"Player '{username}' not found.")
 
         rows = conn.execute(
@@ -413,36 +399,10 @@ def _get_top_patterns(args: dict) -> dict:
     top_n = min(int(args.get("top_n", 5)), 20)
 
     with conn_ctx() as conn:
-        if not conn.execute(
-            "SELECT 1 FROM players WHERE username = ?", (username,)
-        ).fetchone():
+        if not require_player(conn, username):
             raise ValueError(f"Player '{username}' not found.")
 
-        rows = conn.execute(
-            "SELECT a.game_id, a.fen, a.motif_tags"
-            " FROM analyses a JOIN games g ON g.id = a.game_id"
-            " WHERE g.player_username = ?"
-            "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
-            " ORDER BY a.game_id DESC",
-            (username,),
-        ).fetchall()
-
-    games_per_motif: dict[str, set[int]] = defaultdict(set)
-    examples: dict[str, list] = defaultdict(list)
-
-    for r in rows:
-        game_id = r["game_id"]
-        if not r["motif_tags"]:
-            continue
-        try:
-            tags = json.loads(r["motif_tags"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for tag in tags:
-            already = game_id in games_per_motif[tag]
-            games_per_motif[tag].add(game_id)
-            if not already and len(examples[tag]) < 3:
-                examples[tag].append(r["fen"])
+        games_per_motif, examples = top_patterns_core(conn, username)
 
     patterns = sorted(
         games_per_motif.keys(),
@@ -468,9 +428,7 @@ def _next_puzzle(args: dict) -> dict:
     motif = args.get("motif")
 
     with conn_ctx() as conn:
-        if not conn.execute(
-            "SELECT 1 FROM players WHERE username = ?", (username,)
-        ).fetchone():
+        if not require_player(conn, username):
             raise ValueError(f"Player '{username}' not found.")
 
         if motif and motif not in _MOTIF_TO_LICHESS:
@@ -478,37 +436,13 @@ def _next_puzzle(args: dict) -> dict:
 
         target_motif = motif
         if not target_motif:
-            mistake_rows = conn.execute(
-                "SELECT a.motif_tags FROM analyses a"
-                " JOIN games g ON g.id = a.game_id"
-                " WHERE g.player_username = ?"
-                "   AND a.motif_tags IS NOT NULL"
-                "   AND a.classification IN ('blunder', 'mistake', 'inaccuracy')"
-                " ORDER BY a.game_id DESC LIMIT 500",
-                (username,),
-            ).fetchall()
-            counts: dict[str, int] = defaultdict(int)
-            for mr in mistake_rows:
-                try:
-                    tags = json.loads(mr["motif_tags"])
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                for t in tags:
-                    if t in _MOTIF_TO_LICHESS:
-                        counts[t] += 1
-            target_motif = max(counts, key=lambda m: counts[m]) if counts else None
+            target_motif = pick_target_motif(conn, username, own_moves_only=False)
 
         # Prefer Lichess puzzle matching the motif
         if target_motif:
-            lichess_themes = _MOTIF_TO_LICHESS[target_motif]
-            like_clauses = " OR ".join("themes LIKE ?" for _ in lichess_themes)
-            like_params = [f"%{t}%" for t in lichess_themes]
-            puzzle_row = conn.execute(
-                f"SELECT id, fen, solution_moves, themes FROM puzzles"
-                f" WHERE ({like_clauses})"
-                f" ORDER BY RANDOM() LIMIT 1",
-                like_params,
-            ).fetchone()
+            ensure_lichess_puzzles(conn, username, target_motif)
+            puzzle_rows = lichess_puzzles_for_motif(conn, target_motif, 1, username=username)
+            puzzle_row = puzzle_rows[0] if puzzle_rows else None
             if puzzle_row:
                 try:
                     themes_list = json.loads(puzzle_row["themes"])
@@ -524,11 +458,7 @@ def _next_puzzle(args: dict) -> dict:
                 }
 
         # Fall back to own-game pre-blunder position
-        own_params: list = [username]
-        own_where = "g.player_username = ? AND a.classification IN ('blunder', 'mistake')"
-        if target_motif:
-            own_where += " AND a.motif_tags LIKE ?"
-            own_params.append(f"%{target_motif}%")
+        own_where, own_params = own_game_blunders_filter(username, target_motif)
         own_row = conn.execute(
             f"SELECT a.game_id, a.ply, a.fen, a.best_move, a.played_move,"
             f"       a.classification, a.motif_tags"
@@ -554,78 +484,27 @@ def _next_puzzle(args: dict) -> dict:
                 "motif": target_motif,
             }
 
-        raise ValueError("No puzzles found. Import the Lichess puzzle DB or analyze some games first.")
+        raise ValueError("No puzzles found. Analyze some games first so your weak motifs can be detected.")
 
 
 def _submit_puzzle_attempt(args: dict) -> dict:
     username = args["username"].strip().lower()
     puzzle_id = str(args["puzzle_id"])
     solved = bool(args["solved"])
-    now = datetime.now(timezone.utc).isoformat()
 
     with conn_ctx() as conn:
-        if not conn.execute(
-            "SELECT 1 FROM players WHERE username = ?", (username,)
-        ).fetchone():
+        if not require_player(conn, username):
             raise ValueError(f"Player '{username}' not found.")
         if not conn.execute(
             "SELECT 1 FROM puzzles WHERE id = ?", (puzzle_id,)
         ).fetchone():
             raise ValueError(f"Puzzle '{puzzle_id}' not found.")
-        cur = conn.execute(
-            "INSERT INTO puzzle_attempts (puzzle_id, username, solved, attempted_at)"
-            " VALUES (?, ?, ?, ?)",
-            (puzzle_id, username, int(solved), now),
-        )
-        attempt_id = cur.lastrowid
-
-    return {
-        "id": attempt_id,
-        "puzzle_id": puzzle_id,
-        "username": username,
-        "solved": solved,
-        "attempted_at": now,
-    }
-
-
-def _uci_to_san(board: chess.Board, uci_moves: list) -> list:
-    b = board.copy()
-    san_moves = []
-    for uci in uci_moves:
-        try:
-            move = chess.Move.from_uci(uci)
-            san_moves.append(b.san(move))
-            b.push(move)
-        except (ValueError, AssertionError):
-            break
-    return san_moves
-
-
-def _format_lines(board: chess.Board, raw_lines: list) -> list:
-    lines = []
-    for line in raw_lines:
-        move_uci = line["move_uci"]
-        try:
-            move_san = board.san(chess.Move.from_uci(move_uci)) if move_uci else ""
-        except (ValueError, AssertionError):
-            move_san = move_uci
-        pv_uci = line["pv"]
-        pv_san = _uci_to_san(board, pv_uci)
-        lines.append({
-            "rank": line["rank"],
-            "move_uci": move_uci,
-            "move_san": move_san,
-            "eval_cp": line["eval_cp"],
-            "mate": line["mate"],
-            "pv_uci": pv_uci,
-            "pv_san": pv_san,
-        })
-    return lines
+        return record_attempt(conn, puzzle_id, username, solved)
 
 
 def _mcp_evaluate_position(args: dict) -> dict:
     fen = args["fen"]
-    depth = min(int(args.get("depth", 18)), 30)
+    depth = min(int(args.get("depth", DEFAULT_DEPTH)), 30)
     multipv = min(int(args.get("multipv", 3)), 10)
 
     try:
@@ -645,7 +524,7 @@ def _mcp_evaluate_position(args: dict) -> dict:
 def _mcp_explore_line(args: dict) -> dict:
     fen = args["fen"]
     moves = args["moves"]
-    depth = min(int(args.get("depth", 18)), 30)
+    depth = min(int(args.get("depth", DEFAULT_DEPTH)), 30)
     multipv = min(int(args.get("multipv", 1)), 5)
 
     try:
@@ -779,7 +658,7 @@ def _mcp_explain_move(args: dict) -> dict:
         motif_evidence.append(entry)
 
     # Candidate moves from engine_lines cache (or fallback to best_move only)
-    raw_lines = _evaluate_position(fen, depth=18, multipv=multipv)
+    raw_lines = _evaluate_position(fen, depth=DEFAULT_DEPTH, multipv=multipv)
     candidates = _format_lines(board, raw_lines)
 
     return {

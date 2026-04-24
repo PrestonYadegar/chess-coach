@@ -1,7 +1,6 @@
 import Link from "next/link";
 import GameViewer from "./GameViewer";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { API_URL } from "@/lib/api";
 
 interface Game {
   id: number;
@@ -27,7 +26,6 @@ export interface PlyAnalysis {
   classification: string | null;
   motif_tags: string | null;
   phase: string | null;
-  pv: string | null;
   motif_details: string | null;
 }
 
@@ -108,13 +106,13 @@ export default async function GameDetailPage({
   const cls = resultClass(label);
 
   return (
-    <main className="mx-auto max-w-5xl px-6 py-12">
+    <main className="mx-auto max-w-screen-2xl px-6 py-10">
       <div className="mb-8">
         <Link
           href={`/players/${encodeURIComponent(username)}`}
           className="text-sm text-neutral-500 hover:text-neutral-300"
         >
-          ← {username}
+          ← Player Profile ({username})
         </Link>
 
         {game && (

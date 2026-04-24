@@ -74,7 +74,13 @@ export default function FilterBar({
           onChange={(e) => handleChange("opening", e.target.value)}
           // Fixed width so reordering by count (which moves longer names in/out
           // of view) doesn't make the control jump around. Long names truncate.
-          className="w-56 truncate rounded-lg border border-neutral-700 bg-neutral-900 py-1.5 pl-3 pr-8 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+          // appearance-none + bg-image chevron so we control its padding exactly.
+          className="w-56 truncate rounded-lg border border-neutral-700 bg-neutral-900 bg-[length:14px_14px] bg-[right_0.625rem_center] bg-no-repeat py-1.5 pl-3 pr-8 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+          style={{
+            appearance: "none",
+            backgroundImage:
+              "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3a3a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E\")",
+          }}
         >
           <option value="">All openings</option>
           {available.openings.map((o) => (
@@ -90,7 +96,12 @@ export default function FilterBar({
         <select
           value={activeTimeFormat}
           onChange={(e) => handleChange("time_format", e.target.value)}
-          className="rounded-lg border border-neutral-700 bg-neutral-900 py-1.5 pl-3 pr-8 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+          className="rounded-lg border border-neutral-700 bg-neutral-900 bg-[length:14px_14px] bg-[right_0.625rem_center] bg-no-repeat py-1.5 pl-3 pr-8 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+          style={{
+            appearance: "none",
+            backgroundImage:
+              "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3a3a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E\")",
+          }}
         >
           <option value="">All formats</option>
           {available.time_formats.map((f) => (

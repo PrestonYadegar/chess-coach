@@ -23,5 +23,9 @@ tools/games/
 *.sqlite
 *.db
 
-# Ralph loop run logs
+# Build loop — local-only driver scripts + run logs (not tracked)
+.claude_loop/
 .ralph/
+scripts/claude_loop.sh
+scripts/claude_loop_prompt.md
+scripts/claude_loop_stream.py

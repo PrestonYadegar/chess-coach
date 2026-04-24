@@ -9,10 +9,9 @@ apps/
   web/        Next.js 14 (App Router, TS, Tailwind) — UI
   api/        FastAPI + python-chess + Stockfish — ingest, analysis, MCP
 spec/
-  PRD.md      Product spec, source of truth for the ralph loop
-  PROGRESS.md Phase checklist the ralph loop updates each iteration
+  PRD.md      Product spec, source of truth for the build loop
+  PROGRESS.md Phase checklist the build loop updates each iteration
 scripts/
-  ralph.sh    The ralph loop driver
   run-api.sh  Local API runner (creates venv if missing)
 tools/
   download_games.sh   Standalone Chess.com PGN downloader (already used to seed data)
@@ -77,6 +76,10 @@ Save and restart Cursor.
 
 The MCP server reads the same SQLite file as the API. Games must be synced (`POST /players/{username}/sync`) and analyzed (`POST /games/{id}/analyze`) before the tools return useful data.
 
-## The ralph loop
+## The build loop (local-only)
 
-`scripts/ralph.sh` re-invokes Claude Code with a prompt that says: read `spec/PRD.md` and `spec/PROGRESS.md`, pick the next unchecked acceptance criterion, implement it, update PROGRESS, commit. See the script for safety rails.
+This repo was built with a small Claude Code driver loop. The scripts live under
+`scripts/claude_loop*` but are **gitignored** (local-only, not tracked): each run
+re-invokes Claude Code with a prompt that says read `spec/PRD.md` and
+`spec/PROGRESS.md`, pick the next unchecked acceptance criterion, implement it,
+update PROGRESS, commit. See the script for safety rails.

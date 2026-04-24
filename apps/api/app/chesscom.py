@@ -1,4 +1,5 @@
 import io
+import math
 import time
 from datetime import datetime, timezone
 from typing import Iterator
@@ -61,7 +62,6 @@ def iter_games_from_pgn(pgn_text: str) -> Iterator[dict]:
         chesscom_id = _chesscom_id_from_url(url) or _build_synthetic_id(headers)
         played_at = _parse_played_at(headers)
         eco_book, opening_name, opening_ply = classify_game(game)
-        import math
         plies = _count_plies(game)
         yield {
             "chesscom_id": chesscom_id,
