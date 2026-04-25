@@ -1,8 +1,7 @@
 """Repo/service layer: plain functions over a sqlite3 connection.
 
-These hold the DB/business logic that was duplicated between the FastAPI app
-(main.py) and the MCP server (mcp_server.py). Callers pass a connection and
-decide how to signal errors (HTTPException vs ValueError vs SSE event).
+These hold the DB/business logic shared across the FastAPI app. Callers pass
+a connection and decide how to signal errors (HTTPException vs ValueError).
 """
 import io
 import json
@@ -71,8 +70,7 @@ def top_patterns_core(
     game ids the tag appeared in, and examples[tag] is up to 3 example FENs (one
     per game, in most-recent-game-first order).
 
-    Note: this is the simple all-moves aggregation used by the MCP get_top_patterns
-    tool. The main.py /patterns endpoint applies extra per-color and filter logic
+    Note: the main.py /patterns endpoint applies extra per-color and filter logic
     inline and is NOT routed through here.
     """
     rows = conn.execute(
@@ -116,8 +114,7 @@ def pick_target_motif(
     Lichess themes for), scanning the 500 most recent mistake plies.
 
     When `own_moves_only` is True, only the player's own moves are counted
-    (even ply = White). The /patterns and /drill endpoints filter to own moves;
-    the MCP next_puzzle tool historically did not, so it passes False.
+    (even ply = White).
     """
     cols = "a.motif_tags, a.ply, g.white" if own_moves_only else "a.motif_tags"
     mistake_rows = conn.execute(

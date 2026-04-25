@@ -873,7 +873,7 @@ def get_player_stats(
             by_time_format[tf] = {"wins": 0, "losses": 0, "draws": 0}
         inc(by_time_format[tf])
 
-    def top_openings(color_key: str) -> list:
+    def opening_entries(color_key: str) -> list:
         entries = []
         for op_data in opening_stats[color_key].values():
             total = op_data["wins"] + op_data["losses"] + op_data["draws"]
@@ -890,8 +890,17 @@ def get_player_stats(
                 "draws": op_data["draws"],
                 "win_pct": wp,
             })
+        return entries
+
+    def top_openings(color_key: str) -> list:
+        entries = opening_entries(color_key)
         entries.sort(key=lambda x: (-x["win_pct"], -x["games"]))
-        return entries[:3]
+        return entries[:5]
+
+    def most_common_openings(color_key: str) -> list:
+        entries = opening_entries(color_key)
+        entries.sort(key=lambda x: (-x["games"], -x["win_pct"]))
+        return entries[:5]
 
     return {
         "username": username,
@@ -902,11 +911,19 @@ def get_player_stats(
         },
         "by_time_format": {
             tf: _stats_shape(v.get("wins", 0), v.get("losses", 0), v.get("draws", 0))
-            for tf, v in by_time_format.items()
+            for tf, v in sorted(
+                by_time_format.items(),
+                key=lambda kv: ["Daily", "Classical", "Rapid", "Blitz", "Bullet", "Unknown"].index(kv[0])
+                if kv[0] in ["Daily", "Classical", "Rapid", "Blitz", "Bullet", "Unknown"] else 99,
+            )
         },
         "best_openings": {
             "white": top_openings("white"),
             "black": top_openings("black"),
+        },
+        "most_common_openings": {
+            "white": most_common_openings("white"),
+            "black": most_common_openings("black"),
         },
     }
 

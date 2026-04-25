@@ -1,7 +1,6 @@
 """Shared chess move/line formatting helpers.
 
-These mirror the logic previously duplicated in main.py and mcp_server.py for
-turning engine UCI output into SAN and into candidate-line dicts.
+Shared helpers for turning engine UCI output into SAN and candidate-line dicts.
 """
 from typing import Optional
 

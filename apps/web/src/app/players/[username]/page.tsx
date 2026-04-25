@@ -92,6 +92,7 @@ interface StatsResponse {
   by_color: { white: WinRecord; black: WinRecord };
   by_time_format: Record<string, WinRecord>;
   best_openings: { white: BestOpening[]; black: BestOpening[] };
+  most_common_openings: { white: BestOpening[]; black: BestOpening[] };
 }
 
 const MOTIF_DESC: Record<string, string> = {
@@ -371,50 +372,75 @@ export default async function PlayerPage({
             </div>
           </div>
 
-          {/* Best Openings */}
-          {(stats.best_openings.white.length > 0 || stats.best_openings.black.length > 0) && (
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              {(["white", "black"] as const)
-                .map((color) => {
-                  const openings = stats!.best_openings[color];
-                  if (openings.length === 0) return null;
-                  return (
-                    <div key={color} className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-                      <p className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">
-                        <ColorBadge color={color} />
-                        Best Openings as {color === "white" ? "White" : "Black"}
-                      </p>
-                      <div className="space-y-2">
-                        {openings.map((o) => (
-                          <div
-                            key={o.eco ?? o.opening_name}
-                            className="group relative flex items-center justify-between gap-2 text-xs"
-                          >
-                            <span className="truncate text-neutral-300">
-                              {o.opening_name}
-                            </span>
-                            <span className="shrink-0 tabular-nums">
-                              <span className="font-medium text-emerald-400">
-                                {o.win_pct.toFixed(0)}%
-                              </span>
-                              <span className="ml-1 text-neutral-500">({o.games})</span>
-                            </span>
-                            {/* Hover snippet: ECO + representative line */}
-                            <div className="pointer-events-none absolute bottom-full left-0 z-10 mb-1 hidden w-max max-w-xs rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-[11px] leading-snug shadow-lg group-hover:block">
-                              <span className="font-semibold text-neutral-200">{o.opening_name}</span>
-                              {o.eco && <span className="ml-1 text-neutral-500">{o.eco}</span>}
-                              {o.moves && (
-                                <span className="mt-1 block font-mono text-neutral-400">{o.moves}</span>
-                              )}
-                            </div>
+          {/* Most Common Openings + Best Openings */}
+          {(() => {
+            const hasCommon = stats.most_common_openings.white.length > 0 || stats.most_common_openings.black.length > 0;
+            const hasBest = stats.best_openings.white.length > 0 || stats.best_openings.black.length > 0;
+
+            function OpeningRow({ o }: { o: BestOpening }) {
+              return (
+                <div className="group relative flex items-center justify-between gap-2 text-xs">
+                  <span className="truncate text-neutral-300">{o.opening_name}</span>
+                  <span className="shrink-0 tabular-nums">
+                    <span className="font-medium text-emerald-400">{o.win_pct.toFixed(0)}%</span>
+                    <span className="ml-1 text-neutral-500">
+                      {o.wins}W/{o.losses}L/{o.draws}D
+                    </span>
+                  </span>
+                  <div className="pointer-events-none absolute bottom-full left-0 z-10 mb-1 hidden w-max max-w-xs rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-[11px] leading-snug shadow-lg group-hover:block">
+                    <span className="font-semibold text-neutral-200">{o.opening_name}</span>
+                    {o.eco && <span className="ml-1 text-neutral-500">{o.eco}</span>}
+                    {o.moves && (
+                      <span className="mt-1 block font-mono text-neutral-400">{o.moves}</span>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <>
+                {hasCommon && (
+                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                    {(["white", "black"] as const).map((color) => {
+                      const openings = stats!.most_common_openings[color];
+                      if (openings.length === 0) return null;
+                      return (
+                        <div key={color} className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+                          <p className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">
+                            <ColorBadge color={color} />
+                            Most Played as {color === "white" ? "White" : "Black"}
+                          </p>
+                          <div className="space-y-2">
+                            {openings.map((o) => <OpeningRow key={o.eco ?? o.opening_name} o={o} />)}
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {hasBest && (
+                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                    {(["white", "black"] as const).map((color) => {
+                      const openings = stats!.best_openings[color];
+                      if (openings.length === 0) return null;
+                      return (
+                        <div key={color} className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+                          <p className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">
+                            <ColorBadge color={color} />
+                            Best Openings as {color === "white" ? "White" : "Black"}
+                          </p>
+                          <div className="space-y-2">
+                            {openings.map((o) => <OpeningRow key={o.eco ?? o.opening_name} o={o} />)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
