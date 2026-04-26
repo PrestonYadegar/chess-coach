@@ -2,6 +2,14 @@
 
 A free, self-hostable chess learning platform for Chess.com players rated ~1800 and below. Sync your games, analyze with Stockfish, discover your recurring mistake patterns, and drill them with targeted puzzles — no subscription, no paywall, no telemetry.
 
+![Player profile showing win stats, opening breakdown, and mistake patterns](assets/player_profile.png)
+
+![Top mistake patterns across all games with drill CTAs](assets/motif_summary.png)
+
+![Game analysis view with AI narrative, engine candidates, and eval graph](assets/game_analysis.png)
+
+![Puzzle drill with AI coach explanation and engine top lines](assets/puzzle_drill.png)
+
 ## What it does
 
 - **Sync your games** from Chess.com — all archives, incrementally, idempotent

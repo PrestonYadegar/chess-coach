@@ -21,6 +21,8 @@ venv/
 tools/games/
 *.pgn
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 *.db
 
 # Build loop — local-only driver scripts + run logs (not tracked)
