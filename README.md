@@ -2,6 +2,8 @@
 
 A free, self-hostable chess learning platform for Chess.com players rated ~1800 and below. Sync your games, analyze with Stockfish, discover your recurring mistake patterns, and drill them with targeted puzzles — no subscription, no paywall, no telemetry.
 
+> 📖 Check out my blog post related to this project: [Teaching Chess with Language Models](https://prestonyadegar.github.io/blog/teaching-chess-with-language-models.html)
+
 ![Player profile showing win stats, opening breakdown, and mistake patterns](assets/player_profile.png)
 
 ![Top mistake patterns across all games with drill CTAs](assets/motif_summary.png)
